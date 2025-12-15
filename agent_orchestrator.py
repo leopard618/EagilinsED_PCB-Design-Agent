@@ -7,6 +7,10 @@ from llm_client import LLMClient
 from mcp_client import AltiumMCPClient
 import json
 import re
+import logging
+
+# Setup logging
+logger = logging.getLogger(__name__)
 
 
 class AgentOrchestrator:
@@ -238,7 +242,10 @@ If the query is ambiguous, prefer "answer" unless it clearly requires modificati
     
     def _execute_command(self, intent: Dict[str, Any], pcb_info: Dict[str, Any] = None) -> Dict[str, Any]:
         """Execute command via MCP"""
+        logger.info(f"Executing command with intent: {intent}")
+        
         if not self.mcp_client.connected:
+            logger.warning("Not connected to Altium Designer")
             return {
                 "status": "error",
                 "message": "Not connected to Altium Designer. Please connect first."
@@ -258,7 +265,9 @@ If the query is ambiguous, prefer "answer" unless it clearly requires modificati
                 parameters = command_data.get("parameters", {})
         
         if command:
+            logger.info(f"Sending command to MCP: {command} with params: {parameters}")
             result = self.mcp_client.modify_pcb(command, parameters)
+            logger.info(f"MCP result: {result}")
             if result:
                 if result.get("success", False):
                     # Command queued successfully

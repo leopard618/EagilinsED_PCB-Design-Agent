@@ -1,0 +1,9 @@
+[
+  {
+    "command": "modify_pcb",
+    "parameters": {
+      "request": "move R123 to 76, 69"
+    },
+    "timestamp": 1765766056.525193
+  }
+]

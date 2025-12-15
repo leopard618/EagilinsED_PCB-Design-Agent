@@ -2,8 +2,14 @@
 OpenAI LLM Client for Agent Capabilities
 """
 from openai import OpenAI
+import httpx
 from typing import Optional, Dict, Any, Iterator
 from config import OPENAI_API_KEY, OPENAI_MODEL
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -12,8 +18,19 @@ class LLMClient:
     def __init__(self):
         if not OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY not set in environment variables")
-        self.client = OpenAI(api_key=OPENAI_API_KEY)
+        
+        # Create custom HTTP client that bypasses system proxy
+        http_client = httpx.Client(
+            trust_env=False,  # Don't use system proxy settings
+            timeout=60.0,     # 60 second timeout
+        )
+        
+        self.client = OpenAI(
+            api_key=OPENAI_API_KEY,
+            http_client=http_client
+        )
         self.model = OPENAI_MODEL
+        logger.info(f"LLM Client initialized with model: {self.model}")
     
     def chat(self, messages: list, temperature: float = 0.7) -> Optional[str]:
         """
@@ -27,13 +44,16 @@ class LLMClient:
             Response text or None if error
         """
         try:
+            logger.info(f"Sending request to OpenAI ({len(messages)} messages)")
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=temperature
             )
+            logger.info("OpenAI response received successfully")
             return response.choices[0].message.content
         except Exception as e:
+            logger.error(f"Error calling OpenAI API: {e}")
             print(f"Error calling OpenAI API: {e}")
             return None
     
@@ -49,6 +69,7 @@ class LLMClient:
             Text chunks as they arrive
         """
         try:
+            logger.info(f"Sending streaming request to OpenAI ({len(messages)} messages)")
             stream = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -58,7 +79,9 @@ class LLMClient:
             for chunk in stream:
                 if chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
+            logger.info("OpenAI streaming response completed")
         except Exception as e:
+            logger.error(f"Error calling OpenAI API (streaming): {e}")
             print(f"Error calling OpenAI API (streaming): {e}")
             yield None
     

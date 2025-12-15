@@ -55,7 +55,7 @@ class WelcomePage(ctk.CTkFrame):
         # Welcome message
         welcome_label = ctk.CTkLabel(
             self,
-            text="WayNe",
+            text="EagilinsED",
             font=ctk.CTkFont(size=36, weight="bold"),
             anchor="center"
         )
@@ -64,7 +64,7 @@ class WelcomePage(ctk.CTkFrame):
         # Subtitle
         subtitle_label = ctk.CTkLabel(
             self,
-            text="Full PCB Design Assistant",
+            text="PCB Design Assistant",
             font=ctk.CTkFont(size=16),
             text_color="gray"
         )

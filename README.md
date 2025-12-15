@@ -1,4 +1,4 @@
-# WayNe - Full PCB Design Assistant
+# EagilinsED - Full PCB Design Assistant
 
 An intelligent, agent-driven PCB/Schematic design assistant that integrates with Altium Designer using natural language. Supports the complete PCB design lifecycle from schematic capture to manufacturing outputs.
 
@@ -165,4 +165,4 @@ new-version/
 
 ---
 
-**WayNe** - Full PCB Design Lifecycle Assistant 🚀
+**EagilinsED** - Full PCB Design Lifecycle Assistant 🚀

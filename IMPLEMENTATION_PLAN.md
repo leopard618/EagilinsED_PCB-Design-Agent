@@ -1,6 +1,6 @@
 # Full PCB Design Workflow Implementation Plan
 
-This document outlines the complete implementation plan for extending the WayNe PCB Assistant to cover the **entire PCB design lifecycle** - from schematic creation to manufacturing outputs.
+This document outlines the complete implementation plan for extending the EagilinsED PCB Assistant to cover the **entire PCB design lifecycle** - from schematic creation to manufacturing outputs.
 
 ---
 

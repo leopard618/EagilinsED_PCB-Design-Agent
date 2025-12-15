@@ -89,7 +89,7 @@ class AgentPage(ctk.CTkFrame):
         doc_type_name = self.DOC_TYPE_NAMES.get(self.doc_type, "PCB Document")
         title_label = ctk.CTkLabel(
             title_frame,
-            text=f"WayNe - {doc_type_name}",
+            text=f"EagilinsED - {doc_type_name}",
             font=ctk.CTkFont(size=20, weight="bold"),
             anchor="center"
         )

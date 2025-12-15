@@ -81,6 +81,8 @@ Var
     PinObj        : IPCB_Pin;
     TempStr       : String;
     FirstItem     : Boolean;
+    InnerFirstItem: Boolean;
+    NetFirstItem  : Boolean;
 Begin
 
     // Get workspace
@@ -326,14 +328,14 @@ Begin
             Iterator.AddFilter_Method(eProcessAll);
             
             Net := Iterator.FirstPCBObject;
-            FirstItem := True;
+            NetFirstItem := True;
             While Net <> Nil Do
             Begin
                 Inc(NetCount);
                 
-                If Not FirstItem Then
+                If Not NetFirstItem Then
                     JSONStr := JSONStr + ',' + #13#10;
-                FirstItem := False;
+                NetFirstItem := False;
                 
                 JSONStr := JSONStr + '    {' + #13#10;
                 
@@ -348,7 +350,7 @@ Begin
                 // Connected components (find by iterating through pads)
                 JSONStr := JSONStr + '      "connected_components": [';
                 Try
-                    FirstItem := True;
+                    InnerFirstItem := True;
                     // Iterate through all pads to find which components are connected to this net
                     InnerIterator := PCB.BoardIterator_Create;
                     Try
@@ -371,11 +373,11 @@ Begin
                                             If TempStr <> '' Then
                                             Begin
                                                 // Check if we already added this component
-                                                If FirstItem Or (Pos('"' + TempStr + '"', JSONStr) = 0) Then
+                                                If InnerFirstItem Or (Pos('"' + TempStr + '"', JSONStr) = 0) Then
                                                 Begin
-                                                    If Not FirstItem Then
+                                                    If Not InnerFirstItem Then
                                                         JSONStr := JSONStr + ',';
-                                                    FirstItem := False;
+                                                    InnerFirstItem := False;
                                                     JSONStr := JSONStr + '"' + EscapeJsonString(TempStr) + '"';
                                                 End;
                                             End;

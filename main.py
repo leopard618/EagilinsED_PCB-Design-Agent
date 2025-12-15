@@ -3,11 +3,23 @@ EagilinsED - Agent-Driven PCB Design Assistant
 Main Application Entry Point
 """
 import customtkinter as ctk
+import logging
+import sys
 from pages.welcome_page import WelcomePage
 from pages.guidelines_page import GuidelinesPage
 from pages.agent_page import AgentPage
 from config import WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE
 from mcp_client import AltiumMCPClient
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("EagilinsED")
 
 
 class EagilinsEDApp(ctk.CTk):
@@ -45,6 +57,7 @@ class EagilinsEDApp(ctk.CTk):
     
     def on_connect_success(self, mcp_client: AltiumMCPClient):
         """Callback when connection is successful"""
+        logger.info("MCP connection established successfully")
         self.mcp_client = mcp_client
         self.show_guidelines_page()
     
@@ -76,8 +89,18 @@ class EagilinsEDApp(ctk.CTk):
 
 def main():
     """Main entry point"""
-    app = EagilinsEDApp()
-    app.mainloop()
+    logger.info("=" * 50)
+    logger.info("EagilinsED - PCB Design Assistant")
+    logger.info("=" * 50)
+    logger.info("Starting application...")
+    
+    try:
+        app = EagilinsEDApp()
+        logger.info("Application window created successfully")
+        app.mainloop()
+    except Exception as e:
+        logger.error(f"Application error: {e}")
+        raise
 
 
 if __name__ == "__main__":

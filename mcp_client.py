@@ -154,6 +154,13 @@ class AltiumMCPClient:
         self.session = requests.Session()
         self.session.timeout = MCP_TIMEOUT
         self.active_document_type = self.DOC_PCB  # Default to PCB mode
+        
+        # Disable proxy for localhost connections (important for local MCP server)
+        self.session.trust_env = False  # Don't use system proxy settings
+        self.session.proxies = {
+            'http': None,
+            'https': None
+        }
     
     def connect(self) -> Tuple[bool, str]:
         """
@@ -206,10 +213,16 @@ class AltiumMCPClient:
                     return False, "PCB info file was not created within 1 minute. Please make sure you ran the export script in Altium Designer:\n\nFile → Run Script → altium_export_pcb_info.pas → ExportPCBInfo"
             
             # Test connection to MCP server
-            response = self.session.get(
-                f"{self.server_url}/health",
-                timeout=5
-            )
+            print(f"Connecting to MCP server at {self.server_url}...")
+            try:
+                response = self.session.get(
+                    f"{self.server_url}/health",
+                    timeout=5
+                )
+                print(f"Server response: {response.status_code}")
+            except Exception as e:
+                print(f"Server connection error: {e}")
+                raise
             
             if response.status_code == 200:
                 # Check if Altium Designer is available

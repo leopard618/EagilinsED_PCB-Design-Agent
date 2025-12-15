@@ -1714,19 +1714,25 @@ Var
     CommandJson: String;
     Success: Boolean;
     SuccessCount: Integer;
+    FailCount: Integer;
     TriggerFile: String;
     HasTrigger: Boolean;
 Begin
     // Initialize
     CommandsExecuted := False;
     SuccessCount := 0;
+    FailCount := 0;
     
     // Get workspace
     Try
         Workspace := GetWorkspace;
         If Workspace = Nil Then
+        Begin
+            ShowMessage('ERROR: Could not get Altium workspace. Please try again.');
             Exit;
+        End;
     Except
+        ShowMessage('ERROR: Exception getting workspace.');
         Exit;
     End;
     
@@ -1749,7 +1755,10 @@ Begin
     End;
     
     If PCB = Nil Then
+    Begin
+        ShowMessage('ERROR: No PCB document is open. Please open a PCB file first.');
         Exit;
+    End;
     
     // Read commands file - try multiple locations
     FileName := '';
@@ -1800,10 +1809,13 @@ Begin
             If (Length(FileContent) < 10) Or (Pos('[]', FileContent) > 0) Then
             Begin
                 // File exists but has no commands
+                ShowMessage('INFO: No commands to execute.' + #13#10 + #13#10 +
+                           'The command queue is empty. Use EagilinsED to queue commands first.');
                 Exit;
             End;
         Except
-            // Could not read file - silently exit
+            // Could not read file
+            ShowMessage('ERROR: Could not read commands file: ' + OriginalFileName);
             Exit;
         End;
         
@@ -1869,6 +1881,10 @@ Begin
                 Begin
                     Inc(SuccessCount);
                     CommandsExecuted := True;
+                End
+                Else
+                Begin
+                    Inc(FailCount);
                 End;
             End;
             
@@ -1897,9 +1913,20 @@ Begin
                 Except
                 End;
                 
-                // Show success message only
-                If SuccessCount > 0 Then
-                    ShowMessage('SUCCESS: ' + IntToStr(SuccessCount) + ' command(s) executed successfully.');
+                // Show result message
+                If (SuccessCount > 0) And (FailCount = 0) Then
+                    ShowMessage('SUCCESS!' + #13#10 + #13#10 +
+                               IntToStr(SuccessCount) + ' command(s) executed successfully.' + #13#10 + #13#10 +
+                               'PCB info has been updated.')
+                Else If (SuccessCount > 0) And (FailCount > 0) Then
+                    ShowMessage('PARTIAL SUCCESS' + #13#10 + #13#10 +
+                               IntToStr(SuccessCount) + ' command(s) succeeded.' + #13#10 +
+                               IntToStr(FailCount) + ' command(s) failed.' + #13#10 + #13#10 +
+                               'PCB info has been updated.')
+                Else If FailCount > 0 Then
+                    ShowMessage('FAILED' + #13#10 + #13#10 +
+                               IntToStr(FailCount) + ' command(s) failed to execute.' + #13#10 +
+                               'Check command parameters.');
             Except
             End;
         End;
