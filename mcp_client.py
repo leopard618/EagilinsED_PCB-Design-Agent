@@ -291,6 +291,38 @@ class AltiumMCPClient:
             print(f"Error analyzing PCB: {e}")
             return None
     
+    def modify_schematic(self, command: str, parameters: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Modify Schematic through MCP
+        Commands are queued to schematic_commands.json for manual script execution
+        """
+        if not self.connected:
+            return {
+                "success": False,
+                "message": "Not connected to Altium Designer"
+            }
+        
+        try:
+            response = self.session.post(
+                f"{self.server_url}/altium/schematic/modify",
+                json={
+                    "command": command,
+                    "parameters": parameters
+                },
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return {
+                "success": False,
+                "message": f"Server error: {response.status_code}"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error modifying schematic: {str(e)}"
+            }
+    
     def modify_pcb(self, command: str, parameters: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Modify PCB through MCP
@@ -384,6 +416,74 @@ class AltiumMCPClient:
             return None
         except Exception as e:
             print(f"Error getting output result: {e}")
+            return None
+    
+    def get_design_rules(self) -> Optional[Dict[str, Any]]:
+        """Get design rules information"""
+        if not self.connected:
+            return None
+        
+        try:
+            response = self.session.get(
+                f"{self.server_url}/altium/design/rules",
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error getting design rules: {e}")
+            return None
+    
+    def get_board_config(self) -> Optional[Dict[str, Any]]:
+        """Get board configuration information"""
+        if not self.connected:
+            return None
+        
+        try:
+            response = self.session.get(
+                f"{self.server_url}/altium/board/config",
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error getting board config: {e}")
+            return None
+    
+    def get_component_search(self) -> Optional[Dict[str, Any]]:
+        """Get component search results"""
+        if not self.connected:
+            return None
+        
+        try:
+            response = self.session.get(
+                f"{self.server_url}/altium/component/search",
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error getting component search: {e}")
+            return None
+    
+    def get_library_list(self) -> Optional[Dict[str, Any]]:
+        """Get list of installed libraries"""
+        if not self.connected:
+            return None
+        
+        try:
+            response = self.session.get(
+                f"{self.server_url}/altium/libraries",
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error getting library list: {e}")
             return None
     
     def get_files_status(self) -> Optional[Dict[str, Any]]:

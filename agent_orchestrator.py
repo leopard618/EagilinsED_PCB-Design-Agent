@@ -35,14 +35,15 @@ class AgentOrchestrator:
         # Add user query to history
         self.conversation_history.append({"role": "user", "content": user_query})
         
-        # Get current PCB info for context
-        pcb_info = self.mcp_client.get_pcb_info() if self.mcp_client.connected else None
+        # Get ALL available context (not just PCB)
+        all_context = self._get_all_available_context()
         
         # Use LLM to determine intent and generate response
-        intent_response = self._determine_intent(user_query, pcb_info)
+        intent_response = self._determine_intent(user_query, all_context)
         
         if intent_response.get("action") == "execute":
             # Execute command via MCP (commands are queued for manual execution)
+            pcb_info = all_context.get("pcb_info")
             execution_result = self._execute_command(intent_response, pcb_info)
             response_text = execution_result.get("message", "Command queued")
             status = execution_result.get("status", "success")
@@ -59,9 +60,9 @@ class AgentOrchestrator:
         else:
             # Generate conversational response (with streaming if callback provided)
             if stream_callback:
-                response_text = self._generate_response_stream(user_query, pcb_info, stream_callback)
+                response_text = self._generate_response_stream(user_query, all_context, stream_callback)
             else:
-                response_text = self._generate_response(user_query, pcb_info)
+                response_text = self._generate_response(user_query, all_context)
             status = "answered"
             is_execution = False
             
@@ -145,32 +146,172 @@ class AgentOrchestrator:
         except:
             return "Project info available but could not summarize"
     
+    def _summarize_design_rules(self, rules_info: Dict[str, Any] = None) -> str:
+        """Create a concise summary of design rules"""
+        if not rules_info:
+            return "No design rules available"
+        
+        try:
+            stats = rules_info.get("statistics", {})
+            summary = f"Design Rules:\n"
+            summary += f"Total Rules: {stats.get('total_rules', 0)}\n"
+            summary += f"Clearance: {stats.get('clearance_rules', 0)}, Width: {stats.get('width_rules', 0)}, Via: {stats.get('via_rules', 0)}\n"
+            
+            # Get minimum clearance
+            clearance_rules = rules_info.get("clearance_rules", [])
+            if clearance_rules:
+                min_clearance = min([r.get("minimum_mm", 999) for r in clearance_rules if r.get("enabled", True)], default=0)
+                if min_clearance < 999:
+                    summary += f"Min Clearance: {min_clearance:.3f} mm\n"
+            
+            # Get minimum width
+            width_rules = rules_info.get("width_rules", [])
+            if width_rules:
+                min_width = min([r.get("min_width_mm", 999) for r in width_rules if r.get("enabled", True)], default=0)
+                if min_width < 999:
+                    summary += f"Min Track Width: {min_width:.3f} mm"
+            
+            return summary
+        except:
+            return "Design rules available but could not summarize"
+    
+    def _summarize_board_config(self, board_config: Dict[str, Any] = None) -> str:
+        """Create a concise summary of board configuration"""
+        if not board_config:
+            return "No board configuration available"
+        
+        try:
+            board = board_config.get("board", {})
+            layer_stack = board_config.get("layer_stack", {})
+            summary = f"Board Configuration:\n"
+            summary += f"Size: {board.get('width_mm', 0):.1f} x {board.get('height_mm', 0):.1f} mm\n"
+            summary += f"Layers: {layer_stack.get('total_layers', 0)} total, {layer_stack.get('signal_layers', 0)} signal\n"
+            summary += f"Display Unit: {board_config.get('display_unit', 'mm')}\n"
+            summary += f"Grid: {board_config.get('snap_grid_mm', 0):.3f} mm"
+            return summary
+        except:
+            return "Board config available but could not summarize"
+    
+    def _summarize_verification(self, verification: Dict[str, Any] = None) -> str:
+        """Create a concise summary of verification report"""
+        if not verification:
+            return "No verification report available"
+        
+        try:
+            vtype = verification.get("verification_type", "Unknown")
+            summary = f"Verification ({vtype}):\n"
+            
+            if vtype == "DRC":
+                summary_data = verification.get("summary", {})
+                summary += f"Violations: {summary_data.get('total_violations', 0)}\n"
+                summary += f"Errors: {summary_data.get('errors', 0)}, Warnings: {summary_data.get('warnings', 0)}\n"
+                summary += f"Status: {verification.get('status', 'Unknown')}"
+            elif vtype == "ERC":
+                summary_data = verification.get("summary", {})
+                summary += f"Errors: {summary_data.get('errors', 0)}, Warnings: {summary_data.get('warnings', 0)}\n"
+                summary += f"Status: {verification.get('status', 'Unknown')}"
+            else:
+                summary_data = verification.get("summary", {})
+                summary += f"Total Nets: {summary_data.get('total_nets', 0)}\n"
+                summary += f"Routed: {summary_data.get('routed_nets', 0)}, Unrouted: {summary_data.get('unrouted_nets', 0)}"
+            
+            return summary
+        except:
+            return "Verification report available but could not summarize"
+    
+    def _summarize_component_search(self, search_results: Dict[str, Any] = None) -> str:
+        """Create a concise summary of component search results"""
+        if not search_results:
+            return "No component search results available"
+        
+        try:
+            query = search_results.get("query", "Unknown")
+            results = search_results.get("results", [])
+            count = search_results.get("result_count", len(results))
+            summary = f"Component Search: '{query}'\n"
+            summary += f"Found: {count} results\n"
+            
+            if results and len(results) > 0:
+                sample = results[:5]
+                comp_names = [r.get("name", "Unknown") for r in sample]
+                summary += f"Sample: {', '.join(comp_names)}"
+            
+            return summary
+        except:
+            return "Component search results available but could not summarize"
+    
+    def _get_all_available_context(self) -> Dict[str, Any]:
+        """Get ALL available context data - returns dict of all data sources"""
+        context = {}
+        
+        if not self.mcp_client.connected:
+            return context
+        
+        # Try to get all available data (don't fail if some are missing)
+        context["pcb_info"] = self.mcp_client.get_pcb_info()
+        context["schematic_info"] = self.mcp_client.get_schematic_info()
+        context["project_info"] = self.mcp_client.get_project_info()
+        context["verification_report"] = self.mcp_client.get_verification_report()
+        context["design_rules"] = self.mcp_client.get_design_rules()
+        context["board_config"] = self.mcp_client.get_board_config()
+        context["component_search"] = self.mcp_client.get_component_search()
+        context["output_result"] = self.mcp_client.get_output_result()
+        
+        return context
+    
     def _get_all_context(self) -> str:
-        """Get context from all available data sources"""
+        """Get context from all available data sources as formatted string"""
         context = ""
+        all_data = self._get_all_available_context()
         
         # PCB info
-        pcb_info = self.mcp_client.get_pcb_info() if self.mcp_client.connected else None
-        if pcb_info:
-            context += f"[PCB]\n{self._summarize_pcb_info(pcb_info)}\n\n"
+        if all_data.get("pcb_info"):
+            context += f"[PCB]\n{self._summarize_pcb_info(all_data['pcb_info'])}\n\n"
         
         # Schematic info
-        sch_info = self.mcp_client.get_schematic_info() if self.mcp_client.connected else None
-        if sch_info:
-            context += f"[Schematic]\n{self._summarize_schematic_info(sch_info)}\n\n"
+        if all_data.get("schematic_info"):
+            context += f"[Schematic]\n{self._summarize_schematic_info(all_data['schematic_info'])}\n\n"
         
         # Project info
-        prj_info = self.mcp_client.get_project_info() if self.mcp_client.connected else None
-        if prj_info:
-            context += f"[Project]\n{self._summarize_project_info(prj_info)}\n\n"
+        if all_data.get("project_info"):
+            context += f"[Project]\n{self._summarize_project_info(all_data['project_info'])}\n\n"
+        
+        # Design rules
+        if all_data.get("design_rules"):
+            context += f"[Design Rules]\n{self._summarize_design_rules(all_data['design_rules'])}\n\n"
+        
+        # Board config
+        if all_data.get("board_config"):
+            context += f"[Board Config]\n{self._summarize_board_config(all_data['board_config'])}\n\n"
+        
+        # Verification
+        if all_data.get("verification_report"):
+            context += f"[Verification]\n{self._summarize_verification(all_data['verification_report'])}\n\n"
+        
+        # Component search
+        if all_data.get("component_search"):
+            context += f"[Component Search]\n{self._summarize_component_search(all_data['component_search'])}\n\n"
         
         return context if context else "No design data available"
     
-    def _determine_intent(self, query: str, pcb_info: Dict[str, Any] = None) -> Dict[str, Any]:
+    def _determine_intent(self, query: str, all_context: Dict[str, Any] = None) -> Dict[str, Any]:
         """Use LLM to determine if query requires execution or just answering"""
+        if all_context is None:
+            all_context = {}
+        
         system_prompt = """You are an intelligent PCB/Schematic design assistant for Altium Designer. Analyze the user's query and determine:
 1. If it requires executing a command in Altium Designer (like adding components, modifying layout, generating outputs, etc.)
 2. If it's just a question that needs an answer
+
+The assistant has access to multiple data sources:
+- PCB information (components, nets, layers, board size)
+- Schematic information (components, wires, nets, connections)
+- Project information (documents, file structure)
+- Design rules (clearance, width, via rules)
+- Board configuration (layers, stackup, dimensions)
+- Verification reports (DRC/ERC violations, connectivity)
+- Component search results (library components)
+- Manufacturing outputs (BOM, Pick & Place, etc.)
 
 Respond with JSON in this format:
 {
@@ -183,22 +324,35 @@ Respond with JSON in this format:
 
 Available command categories:
 - PCB Modification: move_component, rotate_component, add_component, remove_component, change_value, add_track, add_via
-- Schematic Operations: place_component, add_wire, add_net_label, annotate
+- Schematic Modification: place_component, add_wire, add_net_label, annotate, add_power_port
 - Verification: run_drc, run_erc, check_connectivity
 - Output Generation: generate_gerber, generate_drill, generate_bom, generate_pick_place
 
+Query types that should be "answer":
+- Questions about schematic (components, wires, nets, connections)
+- Questions about project (files, documents, structure)
+- Questions about design rules (clearance, width, via sizes)
+- Questions about board configuration (size, layers, stackup)
+- Questions about verification (DRC/ERC violations, connectivity)
+- Questions about component search results
+- Questions about manufacturing outputs
+- Questions about finding/searching for components (guide to run search script)
+
+Query types that should be "execute":
+- Commands to place components from search results (use place_component with library info)
+
 Execution keywords: add, remove, modify, change, update, place, move, delete, create, set, configure, generate, run, check, verify
-Answer keywords: what, how, why, explain, tell, show, describe, analyze, list, count
+Answer keywords: what, how, why, explain, tell, show, describe, analyze, list, count, where, which
 
 If the query is ambiguous, prefer "answer" unless it clearly requires modification or action."""
         
-        # Use summarized PCB info instead of full JSON
-        pcb_summary = self._summarize_pcb_info(pcb_info)
+        # Build context summary from all available data
+        context_summary = self._get_all_context()
         
         # Limit conversation history to last 2 exchanges (4 messages)
         recent_history = self.conversation_history[-4:] if len(self.conversation_history) > 4 else self.conversation_history
         
-        context = f"PCB Summary: {pcb_summary}\n\n"
+        context = f"Available Design Data:\n{context_summary}\n\n"
         if recent_history:
             context += f"Recent conversation: {json.dumps(recent_history, indent=2)[:500]}"  # Limit history size
         
@@ -241,7 +395,7 @@ If the query is ambiguous, prefer "answer" unless it clearly requires modificati
             }
     
     def _execute_command(self, intent: Dict[str, Any], pcb_info: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Execute command via MCP"""
+        """Execute command via MCP - routes to PCB or Schematic based on command type"""
         logger.info(f"Executing command with intent: {intent}")
         
         if not self.mcp_client.connected:
@@ -265,30 +419,42 @@ If the query is ambiguous, prefer "answer" unless it clearly requires modificati
                 parameters = command_data.get("parameters", {})
         
         if command:
-            logger.info(f"Sending command to MCP: {command} with params: {parameters}")
-            result = self.mcp_client.modify_pcb(command, parameters)
+            # Determine if this is a schematic command
+            schematic_commands = ["place_component", "add_wire", "add_net_label", "annotate", "add_power_port"]
+            is_schematic = any(cmd in command.lower() for cmd in schematic_commands)
+            
+            logger.info(f"Sending command to MCP: {command} with params: {parameters} (schematic: {is_schematic})")
+            
+            if is_schematic:
+                result = self.mcp_client.modify_schematic(command, parameters)
+                script_name = "altium_schematic_modify.pas"
+            else:
+                result = self.mcp_client.modify_pcb(command, parameters)
+                script_name = "altium_execute_commands.pas"
             logger.info(f"MCP result: {result}")
             if result:
                 if result.get("success", False):
                     # Command queued successfully
+                    procedure_name = "ExecuteSchematicCommands" if is_schematic else "ExecuteCommands"
                     return {
                         "status": "success",
-                        "message": "✅ Got it! I've prepared the command for you. " +
-                                  "To apply it, just go to Altium Designer and click File → Run Script, " +
-                                  "then select 'altium_execute_commands.pas' and choose 'ExecuteCommands'. " +
-                                  "It only takes a couple of clicks!"
+                        "message": f"✅ Got it! I've prepared the command for you. " +
+                                  f"To apply it, just go to Altium Designer and click File → Run Script, " +
+                                  f"then select '{script_name}' and choose '{procedure_name}'. " +
+                                  f"It only takes a couple of clicks!"
                     }
                 else:
                     # Check if command was queued successfully
                     error_msg = result.get("message", "").lower()
                     if "queued" in error_msg or "success" in error_msg:
                         # Command queued - provide friendly guidance
+                        procedure_name = "ExecuteSchematicCommands" if is_schematic else "ExecuteCommands"
                         return {
                             "status": "success",
-                            "message": "✅ Perfect! I've prepared everything for you. " +
-                                      "To apply the change, simply go to Altium Designer and click File → Run Script, " +
-                                          "then select 'altium_execute_commands.pas' and choose 'ExecuteCommands'. " +
-                                          "It's just two quick clicks!"
+                            "message": f"✅ Perfect! I've prepared everything for you. " +
+                                      f"To apply the change, simply go to Altium Designer and click File → Run Script, " +
+                                      f"then select '{script_name}' and choose '{procedure_name}'. " +
+                                      f"It's just two quick clicks!"
                             }
                     else:
                         # Modification not supported - provide helpful message
@@ -315,6 +481,116 @@ If the query is ambiguous, prefer "answer" unless it clearly requires modificati
                 "status": "error",
                 "message": "Could not determine command to execute. Please be more specific."
             }
+    
+    def _get_relevant_context_data(self, query: str, all_context: Dict[str, Any] = None) -> str:
+        """Extract only relevant data based on query to save tokens - uses ALL available context"""
+        if not all_context:
+            all_context = {}
+        
+        query_lower = query.lower()
+        context = ""
+        
+        # Determine which data sources are relevant to the query
+        needs_pcb = any(word in query_lower for word in ["pcb", "board", "component", "net", "via", "track", "layer"])
+        needs_schematic = any(word in query_lower for word in ["schematic", "sch", "wire", "pin", "connection"])
+        needs_project = any(word in query_lower for word in ["project", "file", "document", "prj"])
+        needs_rules = any(word in query_lower for word in ["rule", "clearance", "width", "design rule", "constraint"])
+        needs_config = any(word in query_lower for word in ["config", "setup", "stackup", "layer stack", "board size"])
+        needs_verification = any(word in query_lower for word in ["drc", "erc", "violation", "error", "check", "verify"])
+        needs_search = any(word in query_lower for word in ["search", "find", "component", "library", "part"])
+        needs_output = any(word in query_lower for word in ["bom", "gerber", "output", "manufacturing", "pick", "place"])
+        
+        # PCB info
+        pcb_info = all_context.get("pcb_info")
+        if needs_pcb and pcb_info:
+            context += self._get_relevant_pcb_data(query, pcb_info)
+            context += "\n"
+        
+        # Schematic info
+        if needs_schematic and all_context.get("schematic_info"):
+            sch_info = all_context["schematic_info"]
+            context += f"[Schematic]\n{self._summarize_schematic_info(sch_info)}\n"
+            
+            # Add specific component details if asked
+            if "component" in query_lower:
+                components = sch_info.get("components", [])
+                if components:
+                    comp_names = [c.get("designator", "Unknown") for c in components[:10]]
+                    context += f"Components: {', '.join(comp_names)}\n"
+            context += "\n"
+        
+        # Project info
+        if needs_project and all_context.get("project_info"):
+            context += f"[Project]\n{self._summarize_project_info(all_context['project_info'])}\n\n"
+        
+        # Design rules
+        if needs_rules and all_context.get("design_rules"):
+            context += f"[Design Rules]\n{self._summarize_design_rules(all_context['design_rules'])}\n\n"
+        
+        # Board config
+        if needs_config and all_context.get("board_config"):
+            context += f"[Board Config]\n{self._summarize_board_config(all_context['board_config'])}\n\n"
+        
+        # Verification
+        if needs_verification and all_context.get("verification_report"):
+            context += f"[Verification]\n{self._summarize_verification(all_context['verification_report'])}\n\n"
+        
+        # Component search - always include if available, even if not explicitly asked
+        search_results = all_context.get("component_search")
+        if search_results:
+            context += f"[Component Search Results]\n{self._summarize_component_search(search_results)}\n\n"
+            # Add detailed results if user is asking about search
+            if needs_search:
+                results = search_results.get("results", [])
+                if results:
+                    context += "Available components from search:\n"
+                    for i, result in enumerate(results[:10], 1):  # Limit to 10
+                        comp_name = result.get("name", "Unknown")
+                        comp_desc = result.get("description", "No description")
+                        comp_lib = result.get("library", "Unknown library")
+                        context += f"{i}. {comp_name} ({comp_lib})\n"
+                        if comp_desc and comp_desc != "No description":
+                            context += f"   Description: {comp_desc}\n"
+                    context += "\n"
+        
+        # Library list - include if user is searching
+        if needs_search and all_context.get("library_list"):
+            lib_list = all_context["library_list"]
+            libraries = lib_list.get("libraries", [])
+            if libraries:
+                context += f"[Available Libraries]\n"
+                context += f"Total: {lib_list.get('library_count', 0)} libraries\n"
+                lib_names = [lib.get("name", "Unknown") for lib in libraries[:10]]
+                context += f"Sample: {', '.join(lib_names)}\n\n"
+        
+        # Output results
+        if needs_output and all_context.get("output_result"):
+            output = all_context["output_result"]
+            context += f"[Outputs]\nType: {output.get('output_type', 'Unknown')}\n"
+            context += f"Status: {output.get('status', 'Unknown')}\n\n"
+        
+        # If no specific context matched, provide summary of what's available
+        if not context:
+            available = []
+            if all_context.get("pcb_info"):
+                available.append("PCB")
+            if all_context.get("schematic_info"):
+                available.append("Schematic")
+            if all_context.get("project_info"):
+                available.append("Project")
+            if all_context.get("design_rules"):
+                available.append("Design Rules")
+            if all_context.get("board_config"):
+                available.append("Board Config")
+            if all_context.get("verification_report"):
+                available.append("Verification")
+            
+            if available:
+                context = f"Available data: {', '.join(available)}. Please ask a specific question about one of these.\n"
+            else:
+                context = "No design data available. Please export data from Altium Designer first.\n"
+        
+        return context
     
     def _get_relevant_pcb_data(self, query: str, pcb_info: Dict[str, Any] = None) -> str:
         """Extract only relevant PCB data based on query to save tokens"""
@@ -413,10 +689,52 @@ If the query is ambiguous, prefer "answer" unless it clearly requires modificati
         
         return context
     
-    def _generate_response(self, query: str, pcb_info: Dict[str, Any] = None) -> str:
-        """Generate conversational response"""
-        system_prompt = """You are an expert PCB design assistant. Provide helpful, clear, and technical answers about PCB design.
-        Use the PCB information provided to give context-aware responses. If you need specific component or net details, ask the user to query them specifically."""
+    def _generate_response(self, query: str, all_context: Dict[str, Any] = None) -> str:
+        """Generate conversational response using all available context"""
+        if all_context is None:
+            all_context = {}
+        
+        query_lower = query.lower()
+        
+        # Special handling for component search queries
+        if any(word in query_lower for word in ["find", "search", "look for", "component", "library", "part"]) and \
+           not any(word in query_lower for word in ["result", "found", "show", "list", "what"]):
+            search_results = all_context.get("component_search")
+            if not search_results:
+                # Guide user to run search script
+                return (
+                    "I can help you search for components in your Altium libraries! 🔍\n\n"
+                    "To search for components:\n"
+                    "1. In Altium Designer, go to File → Run Script\n"
+                    "2. Select: `altium_component_search.pas`\n"
+                    "3. Choose: `SearchComponents`\n"
+                    "4. Enter your search term (e.g., 'resistor', '10k', '0805')\n"
+                    "5. The results will be saved to `component_search.json`\n\n"
+                    "After you run the search, I can:\n"
+                    "• Show you the search results\n"
+                    "• Help you place components from the results\n"
+                    "• Answer questions about found components\n\n"
+                    "You can also list all installed libraries by running `ListInstalledLibraries` from the same script."
+                )
+        
+        system_prompt = """You are an expert PCB/Schematic design assistant for Altium Designer. Provide helpful, clear, and technical answers about PCB design, schematic design, design rules, board configuration, and manufacturing.
+
+You have access to multiple data sources:
+- PCB information (components, nets, layers, board size)
+- Schematic information (components, wires, nets, power ports)
+- Project information (documents, file structure)
+- Design rules (clearance, width, via rules)
+- Board configuration (layers, stackup, dimensions)
+- Verification reports (DRC/ERC violations, connectivity)
+- Component search results (library components found in search)
+- Manufacturing outputs (BOM, Pick & Place, etc.)
+
+Use the relevant context data provided to give accurate, context-aware responses. If the user asks about something that's in the context, answer directly using that data. If data is not available, guide them on how to export it from Altium Designer.
+
+IMPORTANT: 
+- If the user asks about component search results and they are available in the context, show them the results and offer to help place components from the search results.
+- When showing search results, include component name, library, and description.
+- If user wants to place a component from search results, guide them to use the place_component command with the library information from the search results."""
         
         messages = [
             {"role": "system", "content": system_prompt}
@@ -425,31 +743,66 @@ If the query is ambiguous, prefer "answer" unless it clearly requires modificati
         # Add recent conversation history (limit to last 2 exchanges = 4 messages)
         messages.extend(self.conversation_history[-4:])
         
-        # Add only relevant PCB info (not full JSON)
-        pcb_context = self._get_relevant_pcb_data(query, pcb_info)
-        if pcb_context:
+        # Add only relevant context (not full JSON) - intelligently selected based on query
+        relevant_context = self._get_relevant_context_data(query, all_context)
+        if relevant_context:
             messages.append({
                 "role": "system",
-                "content": f"PCB Context:\n{pcb_context}"
+                "content": f"Design Context:\n{relevant_context}"
             })
         
         response = self.llm_client.chat(messages, temperature=0.7)
         return response or "I'm sorry, I couldn't generate a response. Please try again."
     
-    def _generate_response_stream(self, query: str, pcb_info: Dict[str, Any] = None, stream_callback: Callable[[str], None] = None) -> str:
-        """Generate conversational response with streaming"""
-        system_prompt = """You are an expert PCB design assistant. Provide helpful, clear, and technical answers about PCB design.
-        Use the PCB information provided in the context to answer questions directly. You have access to detailed component information including:
-        - Component locations (x, y coordinates in mm)
-        - Component sizes (width x height in mm)
-        - Component values (from parameters)
-        - Component footprints
-        - Component layers and rotations
-        - Net information
-        - Board statistics
+    def _generate_response_stream(self, query: str, all_context: Dict[str, Any] = None, stream_callback: Callable[[str], None] = None) -> str:
+        """Generate conversational response with streaming using all available context"""
+        if all_context is None:
+            all_context = {}
         
-        When answering questions, use the provided PCB context data directly. Do NOT say you don't have access to the information if it's provided in the context.
-        Be specific and accurate with the data provided."""
+        query_lower = query.lower()
+        
+        # Special handling for component search queries (non-streaming for guidance)
+        if any(word in query_lower for word in ["find", "search", "look for", "component", "library", "part"]) and \
+           not any(word in query_lower for word in ["result", "found", "show", "list", "what"]):
+            search_results = all_context.get("component_search")
+            if not search_results:
+                guidance = (
+                    "I can help you search for components in your Altium libraries! 🔍\n\n"
+                    "To search for components:\n"
+                    "1. In Altium Designer, go to File → Run Script\n"
+                    "2. Select: `altium_component_search.pas`\n"
+                    "3. Choose: `SearchComponents`\n"
+                    "4. Enter your search term (e.g., 'resistor', '10k', '0805')\n"
+                    "5. The results will be saved to `component_search.json`\n\n"
+                    "After you run the search, I can:\n"
+                    "• Show you the search results\n"
+                    "• Help you place components from the results\n"
+                    "• Answer questions about found components\n\n"
+                    "You can also list all installed libraries by running `ListInstalledLibraries` from the same script."
+                )
+                if stream_callback:
+                    stream_callback(guidance)
+                return guidance
+        
+        system_prompt = """You are an expert PCB/Schematic design assistant for Altium Designer. Provide helpful, clear, and technical answers about PCB design, schematic design, design rules, board configuration, and manufacturing.
+
+You have access to multiple data sources:
+- PCB information (components, nets, layers, board size, locations, values, footprints)
+- Schematic information (components, wires, nets, power ports, connections)
+- Project information (documents, file structure)
+- Design rules (clearance, width, via rules, net classes)
+- Board configuration (layers, stackup, dimensions, origin, grid)
+- Verification reports (DRC/ERC violations, connectivity status)
+- Component search results (library components found in search)
+- Manufacturing outputs (BOM, Pick & Place, Gerber, etc.)
+
+When answering questions, use the provided context data directly. Do NOT say you don't have access to the information if it's provided in the context.
+Be specific and accurate with the data provided. If the user asks about something in the context, answer directly using that data.
+
+IMPORTANT: 
+- If the user asks about component search results and they are available in the context, show them the results and offer to help place components from the search results.
+- When showing search results, include component name, library, and description.
+- If user wants to place a component from search results, guide them to use the place_component command with the library information from the search results."""
         
         messages = [
             {"role": "system", "content": system_prompt}
@@ -458,12 +811,12 @@ If the query is ambiguous, prefer "answer" unless it clearly requires modificati
         # Add recent conversation history (limit to last 2 exchanges = 4 messages)
         messages.extend(self.conversation_history[-4:])
         
-        # Add only relevant PCB info (not full JSON)
-        pcb_context = self._get_relevant_pcb_data(query, pcb_info)
-        if pcb_context:
+        # Add only relevant context (not full JSON) - intelligently selected based on query
+        relevant_context = self._get_relevant_context_data(query, all_context)
+        if relevant_context:
             messages.append({
                 "role": "system",
-                "content": f"PCB Context:\n{pcb_context}"
+                "content": f"Design Context:\n{relevant_context}"
             })
         
         full_response = ""

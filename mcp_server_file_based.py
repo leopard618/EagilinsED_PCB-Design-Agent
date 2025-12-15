@@ -38,6 +38,11 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
         self.connectivity_report_path = os.path.join(self.BASE_DIR, "connectivity_report.json")
         self.output_result_path = os.path.join(self.BASE_DIR, "output_result.json")
         self.commands_path = os.path.join(self.BASE_DIR, "pcb_commands.json")
+        self.schematic_commands_path = os.path.join(self.BASE_DIR, "schematic_commands.json")
+        self.design_rules_path = os.path.join(self.BASE_DIR, "design_rules.json")
+        self.board_config_path = os.path.join(self.BASE_DIR, "board_config.json")
+        self.component_search_path = os.path.join(self.BASE_DIR, "component_search.json")
+        self.library_list_path = os.path.join(self.BASE_DIR, "library_list.json")
         
         super().__init__(*args, **kwargs)
     
@@ -293,6 +298,62 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
                     "instructions": "Use altium_scripts/altium_output_generator.pas to generate manufacturing outputs"
                 }, 404)
         
+        elif path == "/altium/design/rules":
+            info = self.get_json_from_file(self.design_rules_path)
+            
+            if info:
+                self._send_json_response(info)
+            else:
+                self._send_json_response({
+                    "error": "No design rules available. Export design rules first.",
+                    "instructions": "1. In Altium Designer, go to File -> Run Script",
+                    "instructions2": "2. Select altium_scripts/altium_design_rules.pas",
+                    "instructions3": "3. Choose ExportDesignRules",
+                    "file_path": self.design_rules_path
+                }, 404)
+        
+        elif path == "/altium/board/config":
+            info = self.get_json_from_file(self.board_config_path)
+            
+            if info:
+                self._send_json_response(info)
+            else:
+                self._send_json_response({
+                    "error": "No board configuration available. Export board config first.",
+                    "instructions": "1. In Altium Designer, go to File -> Run Script",
+                    "instructions2": "2. Select altium_scripts/altium_pcb_setup.pas",
+                    "instructions3": "3. Choose ExportBoardConfig",
+                    "file_path": self.board_config_path
+                }, 404)
+        
+        elif path == "/altium/component/search":
+            info = self.get_json_from_file(self.component_search_path)
+            
+            if info:
+                self._send_json_response(info)
+            else:
+                self._send_json_response({
+                    "error": "No component search results available. Search components first.",
+                    "instructions": "1. In Altium Designer, go to File -> Run Script",
+                    "instructions2": "2. Select altium_scripts/altium_component_search.pas",
+                    "instructions3": "3. Choose SearchComponents",
+                    "file_path": self.component_search_path
+                }, 404)
+        
+        elif path == "/altium/libraries":
+            info = self.get_json_from_file(self.library_list_path)
+            
+            if info:
+                self._send_json_response(info)
+            else:
+                self._send_json_response({
+                    "error": "No library list available. List libraries first.",
+                    "instructions": "1. In Altium Designer, go to File -> Run Script",
+                    "instructions2": "2. Select altium_scripts/altium_component_search.pas",
+                    "instructions3": "3. Choose ListInstalledLibraries",
+                    "file_path": self.library_list_path
+                }, 404)
+        
         elif path == "/altium/files":
             # Return status of all data files
             files_status = {
@@ -320,6 +381,26 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
                     "path": self.output_result_path,
                     "exists": os.path.exists(self.output_result_path),
                     "valid": self.get_json_from_file(self.output_result_path) is not None
+                },
+                "design_rules": {
+                    "path": self.design_rules_path,
+                    "exists": os.path.exists(self.design_rules_path),
+                    "valid": self.get_json_from_file(self.design_rules_path) is not None
+                },
+                "board_config": {
+                    "path": self.board_config_path,
+                    "exists": os.path.exists(self.board_config_path),
+                    "valid": self.get_json_from_file(self.board_config_path) is not None
+                },
+                "component_search": {
+                    "path": self.component_search_path,
+                    "exists": os.path.exists(self.component_search_path),
+                    "valid": self.get_json_from_file(self.component_search_path) is not None
+                },
+                "library_list": {
+                    "path": self.library_list_path,
+                    "exists": os.path.exists(self.library_list_path),
+                    "valid": self.get_json_from_file(self.library_list_path) is not None
                 }
             }
             self._send_json_response(files_status)
@@ -376,6 +457,22 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
                     try:
                         with open(commands_file, 'r', encoding='utf-8') as f:
                             commands = json.load(f)
+        
+        elif path == "/altium/schematic/modify":
+            # File-based modification: write command to file for Altium script to execute
+            command = data.get("command", "")
+            parameters = data.get("parameters", {})
+            
+            try:
+                # Write command to schematic_commands.json
+                commands_file = self.schematic_commands_path
+                
+                # Read existing commands or create new
+                commands = []
+                if os.path.exists(commands_file):
+                    try:
+                        with open(commands_file, 'r', encoding='utf-8') as f:
+                            commands = json.load(f)
                             if not isinstance(commands, list):
                                 commands = []
                     except:
@@ -396,6 +493,49 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
                 self._send_json_response({
                     "success": True,
                     "message": "Command queued. Please run altium_execute_commands.pas in Altium Designer to execute it.",
+                    "command_file": commands_file
+                })
+            except Exception as e:
+                self._send_json_response({
+                    "success": False,
+                    "message": f"Error queuing command: {str(e)}"
+                }, 500)
+        
+        elif path == "/altium/schematic/modify":
+            # File-based modification: write command to file for Altium script to execute
+            command = data.get("command", "")
+            parameters = data.get("parameters", {})
+            
+            try:
+                # Write command to schematic_commands.json
+                commands_file = self.schematic_commands_path
+                
+                # Read existing commands or create new
+                commands = []
+                if os.path.exists(commands_file):
+                    try:
+                        with open(commands_file, 'r', encoding='utf-8') as f:
+                            commands = json.load(f)
+                            if not isinstance(commands, list):
+                                commands = []
+                    except:
+                        commands = []
+                
+                # Add new command
+                new_command = {
+                    "command": command,
+                    "parameters": parameters,
+                    "timestamp": time.time()
+                }
+                commands.append(new_command)
+                
+                # Write back to file
+                with open(commands_file, 'w', encoding='utf-8') as f:
+                    json.dump(commands, f, indent=2)
+                
+                self._send_json_response({
+                    "success": True,
+                    "message": "Command queued. Please run altium_schematic_modify.pas in Altium Designer to execute it.",
                     "command_file": commands_file
                 })
             except Exception as e:
