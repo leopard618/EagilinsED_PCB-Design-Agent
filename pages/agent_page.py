@@ -49,11 +49,19 @@ class ChatMessage(ctk.CTkFrame):
 class AgentPage(ctk.CTkFrame):
     """Main agent page with ChatGPT-like interface"""
     
+    # Document type display names
+    DOC_TYPE_NAMES = {
+        "PCB": "PCB Document",
+        "SCH": "Schematic",
+        "PRJ": "Project"
+    }
+    
     def __init__(self, parent, mcp_client: AltiumMCPClient):
         super().__init__(parent, width=WINDOW_WIDTH, height=WINDOW_HEIGHT)
         self.parent = parent
         self.mcp_client = mcp_client
         self.messages = []
+        self.doc_type = mcp_client.active_document_type if mcp_client else "PCB"
         
         try:
             self.llm_client = LLMClient()
@@ -77,19 +85,20 @@ class AgentPage(ctk.CTkFrame):
         title_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
         title_frame.grid_columnconfigure(0, weight=1)
         
-        # Title
+        # Title (context-aware based on document type)
+        doc_type_name = self.DOC_TYPE_NAMES.get(self.doc_type, "PCB Document")
         title_label = ctk.CTkLabel(
             title_frame,
-            text="PCB Design Assistant",
+            text=f"WayNe - {doc_type_name}",
             font=ctk.CTkFont(size=20, weight="bold"),
             anchor="center"
         )
         title_label.grid(row=0, column=0, pady=5)
         
-        # Status indicator
+        # Status indicator with document type
         self.status_label = ctk.CTkLabel(
             title_frame,
-            text="● Connected",
+            text=f"● Connected to {doc_type_name}",
             font=ctk.CTkFont(size=11),
             text_color="green"
         )
@@ -110,10 +119,17 @@ class AgentPage(ctk.CTkFrame):
         input_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=10)
         input_frame.grid_columnconfigure(0, weight=1)
         
-        # Input entry
+        # Input entry with context-aware placeholder
+        placeholder_texts = {
+            "PCB": "Ask about your PCB design or request modifications...",
+            "SCH": "Ask about your schematic or component connections...",
+            "PRJ": "Ask about your project structure or documents..."
+        }
+        placeholder = placeholder_texts.get(self.doc_type, placeholder_texts["PCB"])
+        
         self.input_entry = ctk.CTkEntry(
             input_frame,
-            placeholder_text="Ask about your PCB or request modifications...",
+            placeholder_text=placeholder,
             height=45,
             font=ctk.CTkFont(size=14),
             corner_radius=20
@@ -138,12 +154,28 @@ class AgentPage(ctk.CTkFrame):
         self.is_loading = False
     
     def add_welcome_message(self):
-        """Add welcome message to chat"""
-        welcome_text = "Hello! I'm your PCB design assistant. I can help you:\n\n"
-        welcome_text += "• Analyze your PCB design\n"
-        welcome_text += "• Answer questions about PCB design\n"
-        welcome_text += "• Execute modifications in Altium Designer\n\n"
-        welcome_text += "Just ask me anything about your PCB!"
+        """Add context-aware welcome message to chat"""
+        if self.doc_type == "SCH":
+            welcome_text = "Hello! I'm your schematic design assistant. I can help you:\n\n"
+            welcome_text += "• Analyze your schematic design\n"
+            welcome_text += "• Find component connections and nets\n"
+            welcome_text += "• Query pin assignments and values\n"
+            welcome_text += "• Check power and ground connections\n\n"
+            welcome_text += "Just ask me anything about your schematic!"
+        elif self.doc_type == "PRJ":
+            welcome_text = "Hello! I'm your project assistant. I can help you:\n\n"
+            welcome_text += "• View project structure and documents\n"
+            welcome_text += "• List schematics and PCBs in the project\n"
+            welcome_text += "• Check project statistics\n"
+            welcome_text += "• Navigate between documents\n\n"
+            welcome_text += "Just ask me anything about your project!"
+        else:  # PCB (default)
+            welcome_text = "Hello! I'm your PCB design assistant. I can help you:\n\n"
+            welcome_text += "• Analyze your PCB layout\n"
+            welcome_text += "• Find component locations and properties\n"
+            welcome_text += "• Execute modifications (move, rotate, add)\n"
+            welcome_text += "• Run DRC and generate outputs\n\n"
+            welcome_text += "Just ask me anything about your PCB!"
         
         self.add_message(welcome_text, is_user=False)
     
