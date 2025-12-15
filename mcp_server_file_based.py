@@ -2,6 +2,13 @@
 File-Based MCP Server for Altium Designer
 Uses Altium scripts to export data to JSON files
 This works when COM interface is not available
+
+Supports:
+- PCB information (pcb_info.json)
+- Schematic information (schematic_info.json)
+- Project information (project_info.json)
+- Verification reports (verification_report.json)
+- Output results (output_result.json)
 """
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
@@ -15,24 +22,22 @@ from pathlib import Path
 class AltiumMCPHandler(BaseHTTPRequestHandler):
     """File-based MCP handler - reads data from JSON files exported by Altium scripts"""
     
+    # Base directory for all data files
+    BASE_DIR = r"E:\Workspace\AI\11.10.WayNe\new-version"
+    
     def __init__(self, *args, **kwargs):
-        # Default location for pcb_info.json (update this to match your Altium project path)
+        # Default location for data files
         self.pcb_info_path = kwargs.pop('pcb_info_path', None)
         if not self.pcb_info_path:
-            # Try common locations
-            possible_paths = [
-                r"E:\Workspace\AI\11.10.WayNe\new-version\pcb_info.json",
-                os.path.join(os.path.expanduser("~"), "Documents", "pcb_info.json"),
-                os.path.join(os.getcwd(), "pcb_info.json"),
-            ]
-            self.pcb_info_path = None
-            for path in possible_paths:
-                if os.path.exists(path):
-                    self.pcb_info_path = path
-                    break
-            # If not found, use the first one as default
-            if not self.pcb_info_path:
-                self.pcb_info_path = possible_paths[0]
+            self.pcb_info_path = os.path.join(self.BASE_DIR, "pcb_info.json")
+        
+        # Additional file paths
+        self.schematic_info_path = os.path.join(self.BASE_DIR, "schematic_info.json")
+        self.project_info_path = os.path.join(self.BASE_DIR, "project_info.json")
+        self.verification_report_path = os.path.join(self.BASE_DIR, "verification_report.json")
+        self.connectivity_report_path = os.path.join(self.BASE_DIR, "connectivity_report.json")
+        self.output_result_path = os.path.join(self.BASE_DIR, "output_result.json")
+        self.commands_path = os.path.join(self.BASE_DIR, "pcb_commands.json")
         
         super().__init__(*args, **kwargs)
     
@@ -60,6 +65,44 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
         content = re.sub(r',(\s*[}\]])', r'\1', content)
         
         return content
+    
+    def get_json_from_file(self, file_path: str):
+        """Read any JSON file with error handling and repair"""
+        if not os.path.exists(file_path):
+            return None
+        
+        try:
+            # Try to read file with UTF-8 first
+            content = None
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    content = f.read()
+            except Exception:
+                encodings = ['utf-8-sig', 'latin-1', 'cp1252']
+                for encoding in encodings:
+                    try:
+                        with open(file_path, 'r', encoding=encoding, errors='replace') as f:
+                            content = f.read()
+                            break
+                    except:
+                        continue
+            
+            if content is None:
+                return None
+            
+            # Try to parse JSON
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                # Try repair
+                repaired = self.repair_json_syntax(content)
+                try:
+                    return json.loads(repaired)
+                except:
+                    return None
+        except Exception as e:
+            print(f"Error reading {file_path}: {e}")
+            return None
     
     def get_pcb_info_from_file(self):
         """Read PCB info from JSON file exported by Altium script"""
@@ -189,11 +232,97 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json_response({
                     "error": "No PCB info available. Please run the Altium script (altium_export_pcb_info.pas) to export PCB information.",
-                    "instructions": "1. In Altium Designer, go to DXP -> Run Script",
-                    "instructions2": "2. Select altium_export_pcb_info.pas",
+                    "instructions": "1. In Altium Designer, go to File -> Run Script",
+                    "instructions2": "2. Select altium_scripts/altium_export_pcb_info.pas",
                     "instructions3": "3. The script will create pcb_info.json",
                     "file_path": self.pcb_info_path
                 }, 404)
+        
+        elif path == "/altium/schematic/info":
+            info = self.get_json_from_file(self.schematic_info_path)
+            
+            if info:
+                self._send_json_response(info)
+            else:
+                self._send_json_response({
+                    "error": "No schematic info available. Please run the Altium script to export schematic information.",
+                    "instructions": "1. In Altium Designer, open a schematic document",
+                    "instructions2": "2. Go to File -> Run Script",
+                    "instructions3": "3. Select altium_scripts/altium_export_schematic_info.pas",
+                    "file_path": self.schematic_info_path
+                }, 404)
+        
+        elif path == "/altium/project/info":
+            info = self.get_json_from_file(self.project_info_path)
+            
+            if info:
+                self._send_json_response(info)
+            else:
+                self._send_json_response({
+                    "error": "No project info available. Please run the Altium script to export project information.",
+                    "instructions": "1. In Altium Designer, open a project",
+                    "instructions2": "2. Go to File -> Run Script",
+                    "instructions3": "3. Select altium_scripts/altium_project_manager.pas -> ExportProjectInfo",
+                    "file_path": self.project_info_path
+                }, 404)
+        
+        elif path == "/altium/verification/report":
+            # Try verification report first, then connectivity
+            info = self.get_json_from_file(self.verification_report_path)
+            if not info:
+                info = self.get_json_from_file(self.connectivity_report_path)
+            
+            if info:
+                self._send_json_response(info)
+            else:
+                self._send_json_response({
+                    "error": "No verification report available. Run DRC/ERC first.",
+                    "instructions": "1. In Altium Designer, go to File -> Run Script",
+                    "instructions2": "2. Select altium_scripts/altium_verification.pas",
+                    "instructions3": "3. Choose RunDRCAndExport, RunERCAndExport, or CheckConnectivityAndExport"
+                }, 404)
+        
+        elif path == "/altium/output/result":
+            info = self.get_json_from_file(self.output_result_path)
+            
+            if info:
+                self._send_json_response(info)
+            else:
+                self._send_json_response({
+                    "error": "No output result available. Generate outputs first.",
+                    "instructions": "Use altium_scripts/altium_output_generator.pas to generate manufacturing outputs"
+                }, 404)
+        
+        elif path == "/altium/files":
+            # Return status of all data files
+            files_status = {
+                "pcb_info": {
+                    "path": self.pcb_info_path,
+                    "exists": os.path.exists(self.pcb_info_path),
+                    "valid": self.get_pcb_info_from_file() is not None
+                },
+                "schematic_info": {
+                    "path": self.schematic_info_path,
+                    "exists": os.path.exists(self.schematic_info_path),
+                    "valid": self.get_json_from_file(self.schematic_info_path) is not None
+                },
+                "project_info": {
+                    "path": self.project_info_path,
+                    "exists": os.path.exists(self.project_info_path),
+                    "valid": self.get_json_from_file(self.project_info_path) is not None
+                },
+                "verification_report": {
+                    "path": self.verification_report_path,
+                    "exists": os.path.exists(self.verification_report_path),
+                    "valid": self.get_json_from_file(self.verification_report_path) is not None
+                },
+                "output_result": {
+                    "path": self.output_result_path,
+                    "exists": os.path.exists(self.output_result_path),
+                    "valid": self.get_json_from_file(self.output_result_path) is not None
+                }
+            }
+            self._send_json_response(files_status)
         
         else:
             self._send_json_response({"error": "Not found"}, 404)

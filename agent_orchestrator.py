@@ -97,10 +97,75 @@ class AgentOrchestrator:
         except:
             return "PCB info available but could not summarize"
     
+    def _summarize_schematic_info(self, sch_info: Dict[str, Any] = None) -> str:
+        """Create a concise summary of schematic info"""
+        if not sch_info:
+            return "No schematic info available"
+        
+        try:
+            stats = sch_info.get("statistics", {})
+            schematic = sch_info.get("schematic", {})
+            summary = f"Schematic: {schematic.get('name', 'Unknown')}\n"
+            summary += f"Title: {schematic.get('title', 'N/A')}\n"
+            summary += f"Components: {stats.get('component_count', 0)}, Wires: {stats.get('wire_count', 0)}\n"
+            summary += f"Net Labels: {stats.get('net_label_count', 0)}, Power Ports: {stats.get('power_port_count', 0)}\n"
+            
+            components = sch_info.get("components", [])
+            if components and len(components) > 0:
+                comp_names = [c.get("designator", "Unknown") if isinstance(c, dict) else str(c) for c in components[:10]]
+                summary += f"Sample components: {', '.join(comp_names)}"
+            
+            return summary
+        except:
+            return "Schematic info available but could not summarize"
+    
+    def _summarize_project_info(self, prj_info: Dict[str, Any] = None) -> str:
+        """Create a concise summary of project info"""
+        if not prj_info:
+            return "No project info available"
+        
+        try:
+            project = prj_info.get("project", {})
+            stats = prj_info.get("statistics", {})
+            summary = f"Project: {project.get('name', 'Unknown')}\n"
+            summary += f"Type: {project.get('type', 'PCB Project')}\n"
+            summary += f"Documents: {stats.get('total_documents', 0)}\n"
+            summary += f"Schematics: {stats.get('schematic_count', 0)}, PCBs: {stats.get('pcb_count', 0)}\n"
+            
+            documents = prj_info.get("documents", [])
+            if documents and len(documents) > 0:
+                doc_names = [d.get("name", "Unknown") if isinstance(d, dict) else str(d) for d in documents[:5]]
+                summary += f"Documents: {', '.join(doc_names)}"
+            
+            return summary
+        except:
+            return "Project info available but could not summarize"
+    
+    def _get_all_context(self) -> str:
+        """Get context from all available data sources"""
+        context = ""
+        
+        # PCB info
+        pcb_info = self.mcp_client.get_pcb_info() if self.mcp_client.connected else None
+        if pcb_info:
+            context += f"[PCB]\n{self._summarize_pcb_info(pcb_info)}\n\n"
+        
+        # Schematic info
+        sch_info = self.mcp_client.get_schematic_info() if self.mcp_client.connected else None
+        if sch_info:
+            context += f"[Schematic]\n{self._summarize_schematic_info(sch_info)}\n\n"
+        
+        # Project info
+        prj_info = self.mcp_client.get_project_info() if self.mcp_client.connected else None
+        if prj_info:
+            context += f"[Project]\n{self._summarize_project_info(prj_info)}\n\n"
+        
+        return context if context else "No design data available"
+    
     def _determine_intent(self, query: str, pcb_info: Dict[str, Any] = None) -> Dict[str, Any]:
         """Use LLM to determine if query requires execution or just answering"""
-        system_prompt = """You are an intelligent PCB design assistant. Analyze the user's query and determine:
-1. If it requires executing a command in Altium Designer (like adding components, modifying layout, etc.)
+        system_prompt = """You are an intelligent PCB/Schematic design assistant for Altium Designer. Analyze the user's query and determine:
+1. If it requires executing a command in Altium Designer (like adding components, modifying layout, generating outputs, etc.)
 2. If it's just a question that needs an answer
 
 Respond with JSON in this format:
@@ -112,10 +177,16 @@ Respond with JSON in this format:
     "response": "your response text" (if action is answer, otherwise null)
 }
 
-Execution keywords: add, remove, modify, change, update, place, move, delete, create, set, configure
-Answer keywords: what, how, why, explain, tell, show, describe, analyze, check, list
+Available command categories:
+- PCB Modification: move_component, rotate_component, add_component, remove_component, change_value, add_track, add_via
+- Schematic Operations: place_component, add_wire, add_net_label, annotate
+- Verification: run_drc, run_erc, check_connectivity
+- Output Generation: generate_gerber, generate_drill, generate_bom, generate_pick_place
 
-If the query is ambiguous, prefer "answer" unless it clearly requires PCB modification."""
+Execution keywords: add, remove, modify, change, update, place, move, delete, create, set, configure, generate, run, check, verify
+Answer keywords: what, how, why, explain, tell, show, describe, analyze, list, count
+
+If the query is ambiguous, prefer "answer" unless it clearly requires modification or action."""
         
         # Use summarized PCB info instead of full JSON
         pcb_summary = self._summarize_pcb_info(pcb_info)

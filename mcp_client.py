@@ -143,11 +143,17 @@ def wait_for_pcb_info(info_file: str = None, timeout: int = 20) -> bool:
 class AltiumMCPClient:
     """Client for communicating with Altium Designer via MCP"""
     
+    # Document types
+    DOC_PCB = "PCB"
+    DOC_SCHEMATIC = "SCH"
+    DOC_PROJECT = "PRJ"
+    
     def __init__(self, server_url: str = None):
         self.server_url = server_url or MCP_SERVER_URL
         self.connected = False
         self.session = requests.Session()
         self.session.timeout = MCP_TIMEOUT
+        self.active_document_type = self.DOC_PCB  # Default to PCB mode
     
     def connect(self) -> Tuple[bool, str]:
         """
@@ -298,4 +304,104 @@ class AltiumMCPClient:
         except Exception as e:
             print(f"Error modifying PCB: {e}")
             return None
+    
+    def get_schematic_info(self) -> Optional[Dict[str, Any]]:
+        """Get information about the current schematic"""
+        if not self.connected:
+            return None
+        
+        try:
+            response = self.session.get(
+                f"{self.server_url}/altium/schematic/info",
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error getting schematic info: {e}")
+            return None
+    
+    def get_project_info(self) -> Optional[Dict[str, Any]]:
+        """Get information about the current project"""
+        if not self.connected:
+            return None
+        
+        try:
+            response = self.session.get(
+                f"{self.server_url}/altium/project/info",
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error getting project info: {e}")
+            return None
+    
+    def get_verification_report(self) -> Optional[Dict[str, Any]]:
+        """Get verification (DRC/ERC) report"""
+        if not self.connected:
+            return None
+        
+        try:
+            response = self.session.get(
+                f"{self.server_url}/altium/verification/report",
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error getting verification report: {e}")
+            return None
+    
+    def get_output_result(self) -> Optional[Dict[str, Any]]:
+        """Get output generation result"""
+        if not self.connected:
+            return None
+        
+        try:
+            response = self.session.get(
+                f"{self.server_url}/altium/output/result",
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error getting output result: {e}")
+            return None
+    
+    def get_files_status(self) -> Optional[Dict[str, Any]]:
+        """Get status of all data files"""
+        if not self.connected:
+            return None
+        
+        try:
+            response = self.session.get(
+                f"{self.server_url}/altium/files",
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error getting files status: {e}")
+            return None
+    
+    def set_document_type(self, doc_type: str):
+        """Set the active document type (PCB, SCH, PRJ)"""
+        if doc_type in [self.DOC_PCB, self.DOC_SCHEMATIC, self.DOC_PROJECT]:
+            self.active_document_type = doc_type
+    
+    def get_current_document_info(self) -> Optional[Dict[str, Any]]:
+        """Get info for the currently active document type"""
+        if self.active_document_type == self.DOC_PCB:
+            return self.get_pcb_info()
+        elif self.active_document_type == self.DOC_SCHEMATIC:
+            return self.get_schematic_info()
+        elif self.active_document_type == self.DOC_PROJECT:
+            return self.get_project_info()
+        return None
 
