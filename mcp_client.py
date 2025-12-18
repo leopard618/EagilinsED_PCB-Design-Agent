@@ -162,6 +162,39 @@ class AltiumMCPClient:
             'https': None
         }
     
+    def connect_simple(self) -> Tuple[bool, str]:
+        """
+        Simplified connection - just checks MCP server and Altium availability
+        Doesn't require PCB info file (for creating projects from scratch)
+        
+        Returns:
+            tuple: (success: bool, message: str)
+        """
+        try:
+            # Test connection to MCP server
+            print(f"Connecting to MCP server at {self.server_url}...")
+            try:
+                response = self.session.get(
+                    f"{self.server_url}/health",
+                    timeout=5
+                )
+                print(f"Server response: {response.status_code}")
+            except requests.exceptions.ConnectionError:
+                return False, "Cannot connect to MCP server. Please ensure the server is running on port 8080."
+            except Exception as e:
+                print(f"Server connection error: {e}")
+                return False, f"Cannot connect to MCP server: {str(e)}"
+            
+            if response.status_code == 200:
+                # MCP server is accessible
+                self.connected = True
+                return True, "Successfully connected to MCP server. Ready to work with Altium Designer."
+            else:
+                return False, f"MCP server not responding correctly: {response.status_code}"
+                
+        except Exception as e:
+            return False, f"Connection error: {str(e)}"
+    
     def connect(self) -> Tuple[bool, str]:
         """
         Connect to Altium Designer via MCP server

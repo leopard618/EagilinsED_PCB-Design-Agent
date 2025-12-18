@@ -1,37 +1,17 @@
 """
 Welcome and Connection Status Page
-Supports PCB, Schematic, and Project document types
+Simplified connection - just checks MCP server and Altium availability
 """
 import customtkinter as ctk
 from mcp_client import AltiumMCPClient
 from config import WINDOW_WIDTH, WINDOW_HEIGHT
 import threading
+import os
+from pathlib import Path
 
 
 class WelcomePage(ctk.CTkFrame):
-    """Welcome page with connection functionality and document type selection"""
-    
-    # Document type options
-    DOC_TYPES = {
-        "PCB Document": {
-            "type": "PCB",
-            "script": "altium_scripts/altium_export_pcb_info.pas",
-            "procedure": "ExportPCBInfo",
-            "description": "Export PCB layout data"
-        },
-        "Schematic": {
-            "type": "SCH", 
-            "script": "altium_scripts/altium_export_schematic_info.pas",
-            "procedure": "ExportSchematicInfo",
-            "description": "Export schematic design data"
-        },
-        "Project Overview": {
-            "type": "PRJ",
-            "script": "altium_scripts/altium_project_manager.pas",
-            "procedure": "ExportProjectInfo",
-            "description": "Export project structure"
-        }
-    }
+    """Welcome page with simplified connection functionality"""
     
     def __init__(self, parent, on_connect_success=None):
         super().__init__(parent, width=WINDOW_WIDTH, height=WINDOW_HEIGHT)
@@ -42,7 +22,6 @@ class WelcomePage(ctk.CTkFrame):
         self.loading_frame = None
         self.loading_label = None
         self.spinner_dots = 0
-        self.selected_doc_type = "PCB Document"  # Default selection
         
         self.setup_ui()
     
@@ -50,16 +29,16 @@ class WelcomePage(ctk.CTkFrame):
         """Setup the UI components"""
         # Configure grid
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(3, weight=1)
         
-        # Welcome message
+        # Welcome message - increased size
         welcome_label = ctk.CTkLabel(
             self,
             text="EagilinsED",
-            font=ctk.CTkFont(size=36, weight="bold"),
+            font=ctk.CTkFont(size=56, weight="bold"),  # Increased from 36 to 48
             anchor="center"
         )
-        welcome_label.grid(row=0, column=0, pady=(60, 10), sticky="n")
+        welcome_label.grid(row=0, column=0, pady=(80, 10), sticky="n")
         
         # Subtitle
         subtitle_label = ctk.CTkLabel(
@@ -68,63 +47,104 @@ class WelcomePage(ctk.CTkFrame):
             font=ctk.CTkFont(size=16),
             text_color="gray"
         )
-        subtitle_label.grid(row=1, column=0, pady=(0, 30), sticky="n")
+        subtitle_label.grid(row=1, column=0, pady=(0, 50), sticky="n")  # Increased spacing
         
-        # Document type selection frame
-        doc_type_frame = ctk.CTkFrame(self, fg_color="transparent")
-        doc_type_frame.grid(row=2, column=0, pady=10, sticky="n")
+        # Logo/Image - Center of the page
+        logo_path = Path(__file__).parent.parent / "assets" / "logo.png"
+        if logo_path.exists():
+            try:
+                # Load image with PIL first (CTkImage requires PIL Image object, not path string)
+                from PIL import Image as PILImage
+                pil_image = PILImage.open(logo_path)
+                
+                # Preserve transparency - don't add white background
+                # Keep RGBA if it has alpha channel, only convert if necessary
+                if pil_image.mode == 'RGBA':
+                    # Keep RGBA to preserve transparency
+                    pass  # Keep as RGBA
+                elif pil_image.mode == 'P' and 'transparency' in pil_image.info:
+                    # Palette mode with transparency - convert to RGBA
+                    pil_image = pil_image.convert('RGBA')
+                elif pil_image.mode not in ('RGB', 'RGBA', 'L'):
+                    # Convert other modes to RGB (but preserve if already RGB)
+                    pil_image = pil_image.convert('RGB')
+                
+                # Get actual dimensions
+                img_width, img_height = pil_image.size
+                
+                # Calculate display size maintaining aspect ratio
+                # Smaller size as requested
+                max_width, max_height = 350, 250
+                aspect_ratio = img_width / img_height
+                
+                if img_width > max_width or img_height > max_height:
+                    if aspect_ratio > 1:  # Wider than tall
+                        display_width = max_width
+                        display_height = int(max_width / aspect_ratio)
+                    else:  # Taller than wide
+                        display_height = max_height
+                        display_width = int(max_height * aspect_ratio)
+                else:
+                    # Use original size if smaller than max
+                    display_width, display_height = img_width, img_height
+                
+                # Resize image with high-quality resampling to avoid noise
+                if display_width != img_width or display_height != img_height:
+                    pil_image = pil_image.resize(
+                        (display_width, display_height), 
+                        resample=PILImage.Resampling.LANCZOS  # High-quality resampling
+                    )
+                
+                # Create CTkImage with PIL Image object (preserves transparency if RGBA)
+                logo_image = ctk.CTkImage(
+                    light_image=pil_image,
+                    dark_image=pil_image,
+                    size=(display_width, display_height)
+                )
+                logo_label = ctk.CTkLabel(
+                    self,
+                    image=logo_image,
+                    text=""  # No text, just image
+                )
+                logo_label.grid(row=2, column=0, pady=(20, 40), sticky="n")  # Moved down a bit
+            except Exception as e:
+                print(f"Could not load logo image: {e}")
+                import traceback
+                traceback.print_exc()
+                # No fallback icons - just skip logo if it fails
+        # No else clause - if image doesn't exist, just don't show anything
         
-        # Document type label
-        doc_type_label = ctk.CTkLabel(
-            doc_type_frame,
-            text="Select Document Type:",
-            font=ctk.CTkFont(size=14, weight="bold")
-        )
-        doc_type_label.pack(pady=(0, 10))
-        
-        # Document type dropdown
-        self.doc_type_var = ctk.StringVar(value="PCB Document")
-        self.doc_type_menu = ctk.CTkOptionMenu(
-            doc_type_frame,
-            values=list(self.DOC_TYPES.keys()),
-            variable=self.doc_type_var,
-            command=self._on_doc_type_change,
-            width=200,
-            height=35,
-            font=ctk.CTkFont(size=14)
-        )
-        self.doc_type_menu.pack(pady=5)
-        
-        # Document type description
-        self.doc_type_desc = ctk.CTkLabel(
-            doc_type_frame,
-            text=self.DOC_TYPES["PCB Document"]["description"],
+        # Info text
+        info_label = ctk.CTkLabel(
+            self,
+            text="Make sure Altium Designer is open before connecting",
             font=ctk.CTkFont(size=12),
             text_color="gray"
         )
-        self.doc_type_desc.pack(pady=5)
+        info_label.grid(row=3, column=0, pady=(0, 30), sticky="n")
         
-        # Status label
+        # Status label (hidden initially, will be updated during connection)
         self.status_label = ctk.CTkLabel(
             self,
-            text="Ready to connect to Altium Designer",
+            text="",  # Empty by default - removed "Ready to connect"
             font=ctk.CTkFont(size=14),
             text_color="gray"
         )
-        self.status_label.grid(row=3, column=0, pady=15, sticky="n")
+        self.status_label.grid(row=4, column=0, pady=(0, 30), sticky="n")
         
-        # Loading text label (hidden initially) - for instructions
+        # Instructions label (hidden initially)
         self.instructions_label = ctk.CTkLabel(
             self,
             text="",
             font=ctk.CTkFont(size=12),
-            text_color="gray"
+            text_color="gray",
+            wraplength=WINDOW_WIDTH - 40
         )
-        self.instructions_label.grid(row=4, column=0, pady=(0, 10), sticky="n")
+        self.instructions_label.grid(row=5, column=0, pady=(0, 20), sticky="n")
         
         # Loading spinner frame (centered, hidden initially)
         self.loading_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.loading_frame.grid(row=5, column=0, sticky="nsew")
+        self.loading_frame.grid(row=6, column=0, sticky="nsew")
         self.loading_frame.grid_columnconfigure(0, weight=1)
         self.loading_frame.grid_rowconfigure(0, weight=1)
         
@@ -176,14 +196,6 @@ class WelcomePage(ctk.CTkFrame):
         )
         self.error_label.grid(row=7, column=0, pady=10, sticky="n")
     
-    def _on_doc_type_change(self, selection):
-        """Handle document type selection change"""
-        self.selected_doc_type = selection
-        if selection in self.DOC_TYPES:
-            self.doc_type_desc.configure(text=self.DOC_TYPES[selection]["description"])
-            # Update the MCP client's document type
-            self.mcp_client.set_document_type(self.DOC_TYPES[selection]["type"])
-    
     def _animate_spinner(self):
         """Animate the loading spinner"""
         if not self.loading_active:
@@ -209,37 +221,24 @@ class WelcomePage(ctk.CTkFrame):
     def _start_loading(self):
         """Start the loading animation"""
         self.loading_active = True
-        self.loading_frame.grid()
+        self.connect_button.grid_remove()  # Hide button when loading
+        self.loading_frame.grid()  # Show loading spinner
         self.spinner_dots = 0
         self._animate_spinner()
     
     def _stop_loading(self):
         """Stop the loading animation"""
         self.loading_active = False
-        self.loading_frame.grid_remove()
+        self.loading_frame.grid_remove()  # Hide loading spinner
+        self.connect_button.grid()  # Show button again
     
     def connect_to_altium(self):
-        """Attempt to connect to Altium Designer (waits for manual script execution)"""
-        # Get selected document type info
-        doc_info = self.DOC_TYPES.get(self.selected_doc_type, self.DOC_TYPES["PCB Document"])
-        
+        """Attempt to connect to Altium Designer - simplified connection"""
         # Update UI to loading state
-        self.connect_button.configure(state="disabled", text="Waiting...")
-        self.doc_type_menu.configure(state="disabled")
+        self.connect_button.configure(state="disabled", text="Connecting...")
         self.error_label.configure(text="")
-        self.status_label.configure(text=f"Waiting for {self.selected_doc_type} data...", text_color="gray")
-        
-        # Show manual execution instructions based on document type
-        instructions = (
-            f"Please run the export script in Altium Designer:\n\n"
-            f"1. Open your {self.selected_doc_type} in Altium\n"
-            f"2. Go to: File → Run Script\n"
-            f"3. Select: {doc_info['script']}\n"
-            f"4. Choose procedure: {doc_info['procedure']}\n"
-            f"5. Click OK\n\n"
-            f"Waiting for data file..."
-        )
-        self.instructions_label.configure(text=instructions, text_color="gray", justify="left")
+        self.status_label.configure(text="Connecting to MCP server...", text_color="gray")
+        self.instructions_label.configure(text="Checking connection...", text_color="gray")
         
         # Start loading animation
         self._start_loading()
@@ -248,8 +247,8 @@ class WelcomePage(ctk.CTkFrame):
         # Run connection in a separate thread to avoid blocking UI
         def connect_thread():
             try:
-                # Attempt connection (this will wait for manual script execution)
-                success, message = self.mcp_client.connect()
+                # Attempt simplified connection (just checks MCP server and Altium availability)
+                success, message = self.mcp_client.connect_simple()
                 
                 # Update UI on main thread
                 self.after(0, self._on_connect_complete, success, message)
@@ -266,7 +265,7 @@ class WelcomePage(ctk.CTkFrame):
         
         if success:
             self.instructions_label.configure(text="")
-            self.status_label.configure(text=f"Connected to {self.selected_doc_type}!", text_color="green")
+            self.status_label.configure(text="Connected successfully!", text_color="green")
             self.error_label.configure(text="", text_color="green")
             # Move to next page immediately
             if self.on_connect_success:
@@ -276,7 +275,6 @@ class WelcomePage(ctk.CTkFrame):
             self.status_label.configure(text="Connection failed", text_color="red")
             self.error_label.configure(text=f"Error: {message}", text_color="red", justify="left")
             self.connect_button.configure(state="normal", text="Connect")
-            self.doc_type_menu.configure(state="normal")
     
     def get_mcp_client(self):
         """Get the MCP client instance"""

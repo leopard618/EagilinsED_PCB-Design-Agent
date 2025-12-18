@@ -1,10 +1,21 @@
 """
-Intelligent Agent Orchestrator
-Decides whether to answer questions or execute commands
+Intelligent Agent Orchestrator - Design Co-Pilot
+
+This agent provides intelligent PCB design assistance:
+- Analyzes schematics and identifies functional blocks
+- Generates placement and routing strategies
+- Reviews designs for potential issues
+- Suggests optimizations and improvements
+
+NOT just a command executor - a design intelligence partner.
 """
 from typing import Dict, Any, Optional, Tuple, Callable
 from llm_client import LLMClient
 from mcp_client import AltiumMCPClient
+from design_analyzer import DesignAnalyzer
+from layout_generator import LayoutGenerator, generate_layout_from_schematic
+from batch_executor import BatchExecutor, AutoLayoutExecutor
+from constraint_generator import ConstraintGenerator, generate_constraints_from_design
 import json
 import re
 import logging
@@ -14,16 +25,28 @@ logger = logging.getLogger(__name__)
 
 
 class AgentOrchestrator:
-    """Intelligent agent that decides whether to answer or execute"""
+    """
+    Intelligent design co-pilot that:
+    - Analyzes schematics and PCBs
+    - Generates design strategies
+    - Reviews and suggests improvements
+    - Executes approved commands
+    """
     
     def __init__(self, llm_client: LLMClient, mcp_client: AltiumMCPClient):
         self.llm_client = llm_client
         self.mcp_client = mcp_client
+        self.design_analyzer = DesignAnalyzer(llm_client)
+        self.layout_generator = LayoutGenerator()
+        self.constraint_generator = ConstraintGenerator()
+        self.auto_executor = AutoLayoutExecutor(mcp_client)
         self.conversation_history = []
+        self.current_analysis = None  # Cache for design analysis
+        self.current_layout = None  # Cache for generated layout
     
     def process_query(self, user_query: str, stream_callback: Optional[Callable[[str], None]] = None) -> Tuple[str, str, bool]:
         """
-        Process user query intelligently
+        Process user query with design intelligence
         
         Args:
             user_query: User's query
@@ -40,8 +63,38 @@ class AgentOrchestrator:
         
         # Use LLM to determine intent and generate response
         intent_response = self._determine_intent(user_query, all_context)
+        action = intent_response.get("action", "answer")
         
-        if intent_response.get("action") == "execute":
+        # Handle design intelligence actions
+        if action == "analyze":
+            response_text = self._perform_design_analysis(user_query, all_context, intent_response)
+            status = "analyzed"
+            is_execution = False
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
+        elif action == "strategy":
+            response_text = self._generate_placement_strategy(user_query, all_context)
+            status = "strategy_generated"
+            is_execution = False
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
+        elif action == "review":
+            response_text = self._perform_design_review(user_query, all_context)
+            status = "reviewed"
+            is_execution = False
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
+        elif action == "generate_layout":
+            response_text = self._generate_autonomous_layout(user_query, all_context)
+            status = "layout_generated"
+            is_execution = True  # This is an execution action
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
+        elif action == "execute":
             # Execute command via MCP (commands are queued for manual execution)
             pcb_info = all_context.get("pcb_info")
             execution_result = self._execute_command(intent_response, pcb_info)
@@ -299,52 +352,51 @@ class AgentOrchestrator:
         if all_context is None:
             all_context = {}
         
-        system_prompt = """You are an intelligent PCB/Schematic design assistant for Altium Designer. Analyze the user's query and determine:
-1. If it requires executing a command in Altium Designer (like adding components, modifying layout, generating outputs, etc.)
-2. If it's just a question that needs an answer
+        system_prompt = """You are an intelligent PCB design co-pilot for Altium Designer. You help professional engineers with design intelligence, not basic operations.
 
-The assistant has access to multiple data sources:
-- PCB information (components, nets, layers, board size)
-- Schematic information (components, wires, nets, connections)
-- Project information (documents, file structure)
+The user may be requesting:
+1. DESIGN ANALYSIS - Analyze schematic, identify functional blocks, understand design intent
+2. PLACEMENT STRATEGY - Generate component placement recommendations
+3. DESIGN REVIEW - Review design for issues, missing components, violations
+4. ANSWER - Answer questions about the current design
+5. EXECUTE - Execute a specific modification command (rare - professionals know Altium)
+
+You have access to:
+- Schematic data (components, nets, connections, topology)
+- PCB data (layers, components, traces, board size)
 - Design rules (clearance, width, via rules)
-- Board configuration (layers, stackup, dimensions)
-- Verification reports (DRC/ERC violations, connectivity)
-- Component search results (library components)
-- Manufacturing outputs (BOM, Pick & Place, etc.)
+- Verification reports (DRC/ERC violations)
 
-Respond with JSON in this format:
+Respond with JSON:
 {
-    "action": "execute" or "answer",
+    "action": "analyze" or "strategy" or "review" or "generate_layout" or "answer" or "execute",
     "reasoning": "brief explanation",
-    "command": "command_name" (if action is execute, otherwise null),
-    "parameters": {} (if action is execute, otherwise null),
-    "response": "your response text" (if action is answer, otherwise null)
+    "analysis_type": "functional_blocks|signal_paths|constraints|full" (if action is analyze),
+    "command": "command_name" (if action is execute),
+    "parameters": {} (if action is execute),
+    "response": null
 }
 
-Available command categories:
-- PCB Modification: move_component, rotate_component, add_component, remove_component, change_value, add_track, add_via
-- Schematic Modification: place_component, add_wire, add_net_label, annotate, add_power_port
-- Verification: run_drc, run_erc, check_connectivity
-- Output Generation: generate_gerber, generate_drill, generate_bom, generate_pick_place
+PRIORITIZE DESIGN INTELLIGENCE:
+- "Analyze this schematic" → analyze (functional_blocks)
+- "What are the functional blocks?" → analyze (functional_blocks)
+- "Generate placement strategy" → strategy
+- "How should I place these components?" → strategy
+- "Review this design" → review
+- "Are there any issues?" → review
+- "What's missing in this design?" → review
+- "Suggest placement for power supply" → strategy
+- "Identify high-speed signals" → analyze (signal_paths)
+- "Generate layout" → generate_layout (AUTONOMOUS LAYOUT)
+- "Create initial placement" → generate_layout
+- "Place all components automatically" → generate_layout
+- "Auto-place the board" → generate_layout
 
-Query types that should be "answer":
-- Questions about schematic (components, wires, nets, connections)
-- Questions about project (files, documents, structure)
-- Questions about design rules (clearance, width, via sizes)
-- Questions about board configuration (size, layers, stackup)
-- Questions about verification (DRC/ERC violations, connectivity)
-- Questions about component search results
-- Questions about manufacturing outputs
-- Questions about finding/searching for components (guide to run search script)
+Only use "execute" for explicit single-component commands like:
+- "Move R1 to 50, 30" → execute
+- "Rotate U1 by 90 degrees" → execute
 
-Query types that should be "execute":
-- Commands to place components from search results (use place_component with library info)
-
-Execution keywords: add, remove, modify, change, update, place, move, delete, create, set, configure, generate, run, check, verify
-Answer keywords: what, how, why, explain, tell, show, describe, analyze, list, count, where, which
-
-If the query is ambiguous, prefer "answer" unless it clearly requires modification or action."""
+Default to design intelligence (analyze/strategy/review/generate_layout) over simple answers."""
         
         # Build context summary from all available data
         context_summary = self._get_all_context()
@@ -434,28 +486,45 @@ If the query is ambiguous, prefer "answer" unless it clearly requires modificati
             logger.info(f"MCP result: {result}")
             if result:
                 if result.get("success", False):
-                    # Command queued successfully
+                    # Command queued successfully - generate natural response using LLM
                     procedure_name = "ExecuteSchematicCommands" if is_schematic else "ExecuteCommands"
+                    command_type = "schematic" if is_schematic else "PCB"
+                    
+                    # Generate natural, varied response using LLM
+                    natural_response = self._generate_command_response(
+                        user_query=intent.get("reasoning", ""),
+                        command=command,
+                        parameters=parameters,
+                        script_name=script_name,
+                        procedure_name=procedure_name,
+                        command_type=command_type
+                    )
+                    
                     return {
                         "status": "success",
-                        "message": f"✅ Got it! I've prepared the command for you. " +
-                                  f"To apply it, just go to Altium Designer and click File → Run Script, " +
-                                  f"then select '{script_name}' and choose '{procedure_name}'. " +
-                                  f"It only takes a couple of clicks!"
+                        "message": natural_response
                     }
                 else:
                     # Check if command was queued successfully
                     error_msg = result.get("message", "").lower()
                     if "queued" in error_msg or "success" in error_msg:
-                        # Command queued - provide friendly guidance
+                        # Command queued - generate natural response
                         procedure_name = "ExecuteSchematicCommands" if is_schematic else "ExecuteCommands"
+                        command_type = "schematic" if is_schematic else "PCB"
+                        
+                        natural_response = self._generate_command_response(
+                            user_query=intent.get("reasoning", ""),
+                            command=command,
+                            parameters=parameters,
+                            script_name=script_name,
+                            procedure_name=procedure_name,
+                            command_type=command_type
+                        )
+                        
                         return {
                             "status": "success",
-                            "message": f"✅ Perfect! I've prepared everything for you. " +
-                                      f"To apply the change, simply go to Altium Designer and click File → Run Script, " +
-                                      f"then select '{script_name}' and choose '{procedure_name}'. " +
-                                      f"It's just two quick clicks!"
-                            }
+                            "message": natural_response
+                        }
                     else:
                         # Modification not supported - provide helpful message
                         return {
@@ -717,7 +786,7 @@ If the query is ambiguous, prefer "answer" unless it clearly requires modificati
                     "You can also list all installed libraries by running `ListInstalledLibraries` from the same script."
                 )
         
-        system_prompt = """You are an expert PCB/Schematic design assistant for Altium Designer. Provide helpful, clear, and technical answers about PCB design, schematic design, design rules, board configuration, and manufacturing.
+        system_prompt = """You are an expert PCB/Schematic design assistant for Altium Designer. You're friendly, knowledgeable, and conversational. Provide helpful, clear, and technical answers about PCB design, schematic design, design rules, board configuration, and manufacturing.
 
 You have access to multiple data sources:
 - PCB information (components, nets, layers, board size)
@@ -732,9 +801,11 @@ You have access to multiple data sources:
 Use the relevant context data provided to give accurate, context-aware responses. If the user asks about something that's in the context, answer directly using that data. If data is not available, guide them on how to export it from Altium Designer.
 
 IMPORTANT: 
+- Be conversational and natural - vary your responses, don't use templates
 - If the user asks about component search results and they are available in the context, show them the results and offer to help place components from the search results.
 - When showing search results, include component name, library, and description.
-- If user wants to place a component from search results, guide them to use the place_component command with the library information from the search results."""
+- If user wants to place a component from search results, guide them to use the place_component command with the library information from the search results.
+- Make your responses feel natural and human-like, not robotic."""
         
         messages = [
             {"role": "system", "content": system_prompt}
@@ -784,7 +855,7 @@ IMPORTANT:
                     stream_callback(guidance)
                 return guidance
         
-        system_prompt = """You are an expert PCB/Schematic design assistant for Altium Designer. Provide helpful, clear, and technical answers about PCB design, schematic design, design rules, board configuration, and manufacturing.
+        system_prompt = """You are an expert PCB/Schematic design assistant for Altium Designer. You're friendly, knowledgeable, and conversational. Provide helpful, clear, and technical answers about PCB design, schematic design, design rules, board configuration, and manufacturing.
 
 You have access to multiple data sources:
 - PCB information (components, nets, layers, board size, locations, values, footprints)
@@ -800,9 +871,11 @@ When answering questions, use the provided context data directly. Do NOT say you
 Be specific and accurate with the data provided. If the user asks about something in the context, answer directly using that data.
 
 IMPORTANT: 
+- Be conversational and natural - vary your responses, don't use templates
 - If the user asks about component search results and they are available in the context, show them the results and offer to help place components from the search results.
 - When showing search results, include component name, library, and description.
-- If user wants to place a component from search results, guide them to use the place_component command with the library information from the search results."""
+- If user wants to place a component from search results, guide them to use the place_component command with the library information from the search results.
+- Make your responses feel natural and human-like, not robotic."""
         
         messages = [
             {"role": "system", "content": system_prompt}
@@ -828,7 +901,292 @@ IMPORTANT:
         
         return full_response or "I'm sorry, I couldn't generate a response. Please try again."
     
+    def _generate_command_response(self, user_query: str, command: str, parameters: Dict[str, Any], 
+                                   script_name: str, procedure_name: str, command_type: str) -> str:
+        """
+        Generate natural, varied response for command execution using LLM
+        Makes responses more conversational and realistic
+        """
+        system_prompt = f"""You are a helpful PCB/Schematic design assistant. The user has requested a {command_type} modification command.
+
+The command "{command}" has been successfully prepared with parameters: {json.dumps(parameters, indent=2)}
+
+To apply this change, the user needs to:
+1. Go to Altium Designer
+2. Click File → Run Script
+3. Select '{script_name}'
+4. Choose '{procedure_name}'
+5. Click OK
+
+Generate a natural, conversational response that:
+- Acknowledges what the user wants to do
+- Confirms the command is ready
+- Provides clear, friendly instructions on how to execute it
+- Varies your wording each time (don't use the same template)
+- Be concise but helpful
+- Use a friendly, professional tone
+
+IMPORTANT: 
+- Don't repeat the exact same message every time
+- Make it sound natural and conversational
+- Show enthusiasm when appropriate
+- Keep it under 3-4 sentences unless more detail is needed"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"User request: {user_query}"}
+        ]
+        
+        # Add recent conversation context for more natural responses
+        if len(self.conversation_history) > 0:
+            messages.append({
+                "role": "system",
+                "content": f"Recent conversation context: {json.dumps(self.conversation_history[-2:], indent=2)}"
+            })
+        
+        # Use slightly higher temperature for more variety
+        response = self.llm_client.chat(messages, temperature=0.8)
+        
+        if response:
+            return response.strip()
+        else:
+            # Fallback to a simple message if LLM fails
+            return f"✅ I've prepared the {command} command for you. To apply it, go to Altium Designer → File → Run Script → {script_name} → {procedure_name}."
+    
     def clear_history(self):
         """Clear conversation history"""
         self.conversation_history = []
+        self.current_analysis = None
+    
+    # =========================================================================
+    # DESIGN INTELLIGENCE METHODS
+    # =========================================================================
+    
+    def _perform_design_analysis(self, query: str, all_context: Dict[str, Any], 
+                                  intent: Dict[str, Any]) -> str:
+        """
+        Perform intelligent design analysis using the DesignAnalyzer.
+        Identifies functional blocks, signals, and design patterns.
+        """
+        analysis_type = intent.get("analysis_type", "full")
+        
+        # Load data into analyzer
+        if all_context.get("schematic_info"):
+            self.design_analyzer.load_schematic_data(all_context["schematic_info"])
+        if all_context.get("pcb_info"):
+            self.design_analyzer.load_pcb_data(all_context["pcb_info"])
+        
+        # Perform analysis
+        analysis = self.design_analyzer.analyze_schematic()
+        self.current_analysis = analysis  # Cache for follow-up questions
+        
+        # Format response using LLM for natural language
+        prompt = f"""Based on this design analysis, provide a clear summary for the PCB engineer.
+
+User Question: {query}
+
+Analysis Results:
+{json.dumps(analysis, indent=2)}
+
+Provide a professional, insightful response that:
+1. Summarizes the key findings
+2. Identifies the functional blocks found
+3. Highlights critical components and their placement requirements
+4. Notes any potential issues or considerations
+5. Suggests next steps if appropriate
+
+Be specific and technical - this is for a professional PCB engineer."""
+
+        messages = [
+            {"role": "system", "content": "You are an expert PCB design engineer providing design analysis insights."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        response = self.llm_client.chat(messages, temperature=0.5)
+        return response or "Analysis complete. Please check the design data."
+    
+    def _generate_placement_strategy(self, query: str, all_context: Dict[str, Any]) -> str:
+        """
+        Generate intelligent placement strategy recommendations.
+        Uses schematic topology to suggest component placement.
+        """
+        # Load data into analyzer
+        if all_context.get("schematic_info"):
+            self.design_analyzer.load_schematic_data(all_context["schematic_info"])
+        if all_context.get("pcb_info"):
+            self.design_analyzer.load_pcb_data(all_context["pcb_info"])
+        
+        # Generate placement strategy
+        strategy = self.design_analyzer.generate_placement_strategy()
+        
+        if "error" in strategy:
+            return "I need schematic or PCB data to generate a placement strategy. Please export your design data first using the Altium scripts."
+        
+        # Format response
+        prompt = f"""Based on this placement strategy analysis, provide clear recommendations.
+
+User Request: {query}
+
+Strategy Analysis:
+{json.dumps(strategy, indent=2)}
+
+Provide actionable placement recommendations that:
+1. Explain the recommended board zones and why
+2. List the placement order with priorities
+3. Highlight critical spacing requirements
+4. Suggest routing priorities
+5. Note any special considerations
+
+Be specific with measurements and component references."""
+
+        messages = [
+            {"role": "system", "content": "You are an expert PCB layout engineer providing placement strategy recommendations."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        response = self.llm_client.chat(messages, temperature=0.5)
+        return response or "Strategy generated. Please review the placement recommendations."
+    
+    def _perform_design_review(self, query: str, all_context: Dict[str, Any]) -> str:
+        """
+        Perform design review to identify issues and suggest improvements.
+        Checks for missing components, design rule violations, etc.
+        """
+        # Load data into analyzer
+        if all_context.get("schematic_info"):
+            self.design_analyzer.load_schematic_data(all_context["schematic_info"])
+        if all_context.get("pcb_info"):
+            self.design_analyzer.load_pcb_data(all_context["pcb_info"])
+        
+        # Perform review
+        review = self.design_analyzer.review_design()
+        
+        # Also get verification data if available
+        verification = all_context.get("verification_report", {})
+        
+        # Format response
+        prompt = f"""Based on this design review, provide a comprehensive assessment.
+
+User Request: {query}
+
+Design Review Results:
+{json.dumps(review, indent=2)}
+
+Verification Data:
+{json.dumps(verification, indent=2) if verification else "No verification data available"}
+
+Provide a professional design review that:
+1. Lists any issues found (warnings, errors)
+2. Explains why each issue matters
+3. Provides specific recommendations to fix each issue
+4. Suggests optimizations and improvements
+5. Gives an overall design health assessment
+
+Be constructive and specific - help the engineer improve the design."""
+
+        messages = [
+            {"role": "system", "content": "You are a senior PCB design reviewer providing constructive feedback."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        response = self.llm_client.chat(messages, temperature=0.5)
+        return response or "Review complete. Please check the findings."
+    
+    def _generate_autonomous_layout(self, query: str, all_context: Dict[str, Any]) -> str:
+        """
+        Generate a complete PCB layout autonomously.
+        This is the core capability that converts schematic → PCB layout.
+        """
+        # Check for required data
+        schematic_info = all_context.get("schematic_info")
+        pcb_info = all_context.get("pcb_info")
+        
+        if not schematic_info and not pcb_info:
+            return (
+                "I need design data to generate a layout. Please export your schematic or PCB data first:\n\n"
+                "1. Open your project in Altium Designer\n"
+                "2. Go to File → Run Script\n"
+                "3. Run 'altium_export_schematic_info.pas' → ExportSchematicInfo\n"
+                "   or 'altium_export_pcb_info.pas' → ExportPCBInfo\n\n"
+                "Once exported, I can analyze your design and generate an optimal layout."
+            )
+        
+        # Get board size from PCB info or use defaults
+        board_width = 100.0
+        board_height = 80.0
+        
+        if pcb_info:
+            board_size = pcb_info.get("board_size", {})
+            board_width = board_size.get("width_mm", 100.0)
+            board_height = board_size.get("height_mm", 80.0)
+        
+        # Get components from schematic or PCB
+        components = []
+        if schematic_info:
+            components = schematic_info.get("components", [])
+        elif pcb_info:
+            components = pcb_info.get("components", [])
+        
+        if not components:
+            return "No components found in the design data. Please ensure your schematic has components and export the data again."
+        
+        # First, analyze the design
+        self.design_analyzer.load_schematic_data(schematic_info or {})
+        if pcb_info:
+            self.design_analyzer.load_pcb_data(pcb_info)
+        
+        analysis = self.design_analyzer.analyze_schematic()
+        
+        # Generate layout
+        self.layout_generator.set_board_size(board_width, board_height)
+        placements = self.layout_generator.generate_layout(components)
+        constraints = self.layout_generator.generate_constraints(analysis.get("signal_analysis"))
+        
+        # Generate batch execution
+        commands = self.layout_generator.generate_placement_commands()
+        execution_result = self.auto_executor.execute_layout(commands, method="batch_script")
+        
+        # Cache for follow-up
+        self.current_layout = {
+            "placements": placements,
+            "constraints": constraints,
+            "execution": execution_result
+        }
+        
+        # Generate response
+        summary = self.layout_generator.get_placement_summary()
+        
+        response = f"""## Layout Generated Successfully
+
+I've analyzed your design and generated an initial PCB layout.
+
+### Summary
+- **Components placed:** {summary['total_components']}
+- **Board size:** {summary['board_size']['width_mm']}mm x {summary['board_size']['height_mm']}mm
+- **Design constraints:** {summary['constraints_count']} rules generated
+
+### Functional Block Placement
+"""
+        
+        for block, count in summary.get("by_block", {}).items():
+            response += f"- **{block.replace('_', ' ').title()}:** {count} components\n"
+        
+        response += f"""
+### Generated Files
+- **Batch Script:** `{execution_result.get('files', {}).get('script', 'batch_placement.pas')}`
+
+### To Apply the Layout
+
+{execution_result.get('instructions', '')}
+
+### What's Next?
+1. Review the placement in Altium
+2. Adjust any components that need fine-tuning
+3. Ask me to "review the design" for any issues
+4. Start routing when satisfied with placement
+
+Would you like me to explain the placement strategy or make any adjustments?
+"""
+        
+        return response
 

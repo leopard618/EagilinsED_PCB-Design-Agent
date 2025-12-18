@@ -457,6 +457,33 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
                     try:
                         with open(commands_file, 'r', encoding='utf-8') as f:
                             commands = json.load(f)
+                            if not isinstance(commands, list):
+                                commands = []
+                    except:
+                        commands = []
+                
+                # Add new command
+                new_command = {
+                    "command": command,
+                    "parameters": parameters,
+                    "timestamp": time.time()
+                }
+                commands.append(new_command)
+                
+                # Write back to file
+                with open(commands_file, 'w', encoding='utf-8') as f:
+                    json.dump(commands, f, indent=2)
+                
+                self._send_json_response({
+                    "success": True,
+                    "message": "Command queued. Please run altium_execute_commands.pas in Altium Designer to execute it.",
+                    "command_file": commands_file
+                })
+            except Exception as e:
+                self._send_json_response({
+                    "success": False,
+                    "message": f"Failed to queue command: {str(e)}"
+                }, 500)
         
         elif path == "/altium/schematic/modify":
             # File-based modification: write command to file for Altium script to execute
