@@ -101,7 +101,7 @@ class EagilinsEDApp(ctk.CTk):
             widget.destroy()
         
         if self.mcp_client:
-            agent_page = AgentPage(self, self.mcp_client)
+            agent_page = AgentPage(self, self.mcp_client, on_back=self.show_project_setup_page)
             agent_page.pack(fill="both", expand=True)
         else:
             # Fallback: show welcome page if no client
