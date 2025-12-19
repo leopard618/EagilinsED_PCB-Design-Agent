@@ -431,9 +431,23 @@ Default to design intelligence (analyze/strategy/review/generate_layout) over si
     
     def _fallback_intent_detection(self, query: str) -> Dict[str, Any]:
         """Fallback intent detection using keywords"""
-        execution_keywords = ["add", "remove", "modify", "change", "update", "place", "move", "delete", "create", "set"]
         query_lower = query.lower()
         
+        # Check for project creation
+        if "create project" in query_lower or "new project" in query_lower or "create new project" in query_lower:
+            # Extract project name from query
+            import re
+            name_match = re.search(r'(?:project|project called|project named|name)\s+([A-Za-z0-9_]+)', query, re.IGNORECASE)
+            project_name = name_match.group(1) if name_match else "MyProject"
+            
+            return {
+                "action": "execute",
+                "command": "create_new_project",
+                "parameters": {"project_name": project_name}
+            }
+        
+        # Check for other execution keywords
+        execution_keywords = ["add", "remove", "modify", "change", "update", "place", "move", "delete", "set"]
         if any(keyword in query_lower for keyword in execution_keywords):
             return {
                 "action": "execute",
@@ -477,17 +491,17 @@ Default to design intelligence (analyze/strategy/review/generate_layout) over si
             
             logger.info(f"Sending command to MCP: {command} with params: {parameters} (schematic: {is_schematic})")
             
+            # Commands are now split into individual files - use main.pas router
             if is_schematic:
                 result = self.mcp_client.modify_schematic(command, parameters)
-                script_name = "altium_schematic_modify.pas"
             else:
                 result = self.mcp_client.modify_pcb(command, parameters)
-                script_name = "altium_execute_commands.pas"
+            script_name = "main.pas"  # Router script that shows which command script to run
             logger.info(f"MCP result: {result}")
             if result:
                 if result.get("success", False):
                     # Command queued successfully - generate natural response using LLM
-                    procedure_name = "ExecuteSchematicCommands" if is_schematic else "ExecuteCommands"
+                    procedure_name = "ShowCommand"  # Shows which individual script to run
                     command_type = "schematic" if is_schematic else "PCB"
                     
                     # Generate natural, varied response using LLM
@@ -759,7 +773,7 @@ Default to design intelligence (analyze/strategy/review/generate_layout) over si
         return context
     
     def _generate_response(self, query: str, all_context: Dict[str, Any] = None) -> str:
-        """Generate conversational response using all available context"""
+        """Generate concise, short response using all available context"""
         if all_context is None:
             all_context = {}
         
@@ -772,40 +786,19 @@ Default to design intelligence (analyze/strategy/review/generate_layout) over si
             if not search_results:
                 # Guide user to run search script
                 return (
-                    "I can help you search for components in your Altium libraries! 🔍\n\n"
-                    "To search for components:\n"
-                    "1. In Altium Designer, go to File → Run Script\n"
-                    "2. Select: `altium_component_search.pas`\n"
-                    "3. Choose: `SearchComponents`\n"
-                    "4. Enter your search term (e.g., 'resistor', '10k', '0805')\n"
-                    "5. The results will be saved to `component_search.json`\n\n"
-                    "After you run the search, I can:\n"
-                    "• Show you the search results\n"
-                    "• Help you place components from the results\n"
-                    "• Answer questions about found components\n\n"
-                    "You can also list all installed libraries by running `ListInstalledLibraries` from the same script."
+                    "To search components: File → Run Script → altium_component_search.pas → SearchComponents\n"
+                    "Results saved to component_search.json. I'll show them after you run the search."
                 )
         
-        system_prompt = """You are an expert PCB/Schematic design assistant for Altium Designer. You're friendly, knowledgeable, and conversational. Provide helpful, clear, and technical answers about PCB design, schematic design, design rules, board configuration, and manufacturing.
+        system_prompt = """You are an expert PCB/Schematic design assistant. Be concise and direct.
 
-You have access to multiple data sources:
-- PCB information (components, nets, layers, board size)
-- Schematic information (components, wires, nets, power ports)
-- Project information (documents, file structure)
-- Design rules (clearance, width, via rules)
-- Board configuration (layers, stackup, dimensions)
-- Verification reports (DRC/ERC violations, connectivity)
-- Component search results (library components found in search)
-- Manufacturing outputs (BOM, Pick & Place, etc.)
+CRITICAL: Keep responses SHORT (2-3 sentences max). Get straight to the point.
 
-Use the relevant context data provided to give accurate, context-aware responses. If the user asks about something that's in the context, answer directly using that data. If data is not available, guide them on how to export it from Altium Designer.
+Available data: PCB, Schematic, Project, Design Rules, Board Config, Verification, Component Search, Outputs.
 
-IMPORTANT: 
-- Be conversational and natural - vary your responses, don't use templates
-- If the user asks about component search results and they are available in the context, show them the results and offer to help place components from the search results.
-- When showing search results, include component name, library, and description.
-- If user wants to place a component from search results, guide them to use the place_component command with the library information from the search results.
-- Make your responses feel natural and human-like, not robotic."""
+Answer directly using context data. If data is missing, briefly guide them to export it.
+
+Be natural but brief. No long explanations unless specifically asked."""
         
         messages = [
             {"role": "system", "content": system_prompt}
@@ -838,44 +831,22 @@ IMPORTANT:
             search_results = all_context.get("component_search")
             if not search_results:
                 guidance = (
-                    "I can help you search for components in your Altium libraries! 🔍\n\n"
-                    "To search for components:\n"
-                    "1. In Altium Designer, go to File → Run Script\n"
-                    "2. Select: `altium_component_search.pas`\n"
-                    "3. Choose: `SearchComponents`\n"
-                    "4. Enter your search term (e.g., 'resistor', '10k', '0805')\n"
-                    "5. The results will be saved to `component_search.json`\n\n"
-                    "After you run the search, I can:\n"
-                    "• Show you the search results\n"
-                    "• Help you place components from the results\n"
-                    "• Answer questions about found components\n\n"
-                    "You can also list all installed libraries by running `ListInstalledLibraries` from the same script."
+                    "To search components: File → Run Script → altium_component_search.pas → SearchComponents\n"
+                    "Results saved to component_search.json. I'll show them after you run the search."
                 )
                 if stream_callback:
                     stream_callback(guidance)
                 return guidance
         
-        system_prompt = """You are an expert PCB/Schematic design assistant for Altium Designer. You're friendly, knowledgeable, and conversational. Provide helpful, clear, and technical answers about PCB design, schematic design, design rules, board configuration, and manufacturing.
+        system_prompt = """You are an expert PCB/Schematic design assistant. Be concise and direct.
 
-You have access to multiple data sources:
-- PCB information (components, nets, layers, board size, locations, values, footprints)
-- Schematic information (components, wires, nets, power ports, connections)
-- Project information (documents, file structure)
-- Design rules (clearance, width, via rules, net classes)
-- Board configuration (layers, stackup, dimensions, origin, grid)
-- Verification reports (DRC/ERC violations, connectivity status)
-- Component search results (library components found in search)
-- Manufacturing outputs (BOM, Pick & Place, Gerber, etc.)
+CRITICAL: Keep responses SHORT (2-3 sentences max). Get straight to the point.
 
-When answering questions, use the provided context data directly. Do NOT say you don't have access to the information if it's provided in the context.
-Be specific and accurate with the data provided. If the user asks about something in the context, answer directly using that data.
+Available data: PCB, Schematic, Project, Design Rules, Board Config, Verification, Component Search, Outputs.
 
-IMPORTANT: 
-- Be conversational and natural - vary your responses, don't use templates
-- If the user asks about component search results and they are available in the context, show them the results and offer to help place components from the search results.
-- When showing search results, include component name, library, and description.
-- If user wants to place a component from search results, guide them to use the place_component command with the library information from the search results.
-- Make your responses feel natural and human-like, not robotic."""
+Answer directly using context data. If data is missing, briefly guide them to export it.
+
+Be natural but brief. No long explanations unless specifically asked."""
         
         messages = [
             {"role": "system", "content": system_prompt}
@@ -978,6 +949,18 @@ IMPORTANT:
         
         # Perform analysis
         analysis = self.design_analyzer.analyze_schematic()
+        
+        # Check for errors
+        if isinstance(analysis, dict) and "error" in analysis:
+            return (
+                "I need schematic or PCB data to analyze your design. Please export your design data first:\n\n"
+                "1. Open your project in Altium Designer\n"
+                "2. Go to File → Run Script\n"
+                "3. Run 'altium_export_schematic_info.pas' → ExportSchematicInfo\n"
+                "   or 'altium_export_pcb_info.pas' → ExportPCBInfo\n\n"
+                "Once exported, I can analyze your design."
+            )
+        
         self.current_analysis = analysis  # Cache for follow-up questions
         
         # Format response using LLM for natural language

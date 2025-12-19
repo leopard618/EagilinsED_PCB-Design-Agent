@@ -1,21 +1,11 @@
 {*
- * Altium Designer Script - Export Schematic Information
- * Compatible with Altium Designer 25.5.2
- * 
- * Exports comprehensive schematic information to JSON:
- * - All components with designators, values, footprints
- * - All wires and connections
- * - All nets and net labels
- * - Power ports
- * - Sheet information
- * 
- * TO RUN THIS SCRIPT:
- * 1. Click on the Schematic document tab to make it active
- * 2. In Altium Designer, go to: File -> Run Script
- * 3. Select this file: altium_export_schematic_info.pas
- * 4. When dialog appears, select "ExportSchematicInfo" procedure
- * 5. Click OK
+ * Export Schematic Info Command
+ * Exports comprehensive schematic information to schematic_info.json
+ * Command: export_schematic_info
  *}
+
+Const
+    BASE_PATH = 'E:\Workspace\AI\11.10.WayNe\new-version\';
 
 // Helper function to escape JSON strings
 Function EscapeJsonString(InputStr: String): String;
@@ -68,7 +58,6 @@ Var
     Port          : ISch_Port;
     Pin           : ISch_Pin;
     Parameter     : ISch_Parameter;
-    SchObject     : ISch_GraphicalObject;
     OutputFile    : TStringList;
     FileName      : String;
     JSONStr       : String;
@@ -84,7 +73,6 @@ Var
     ValueStr      : String;
     FootprintStr  : String;
     LibRefStr     : String;
-    PinList       : String;
     PinIterator   : ISch_Iterator;
     PinFirst      : Boolean;
 Begin
@@ -92,14 +80,12 @@ Begin
     CurrentSheet := Nil;
     
     Try
-        // Try to get current schematic document
         CurrentSheet := SchServer.GetCurrentSchDocument;
     Except
     End;
     
     If CurrentSheet = Nil Then
     Begin
-        // Try via workspace
         Try
             Workspace := GetWorkspace;
             If Workspace <> Nil Then
@@ -142,7 +128,6 @@ Begin
     End;
     
     Try
-        // Get sheet size
         JSONStr := JSONStr + '    "sheet_style": "' + EscapeJsonString(CurrentSheet.SheetStyle) + '",' + #13#10;
     Except
         JSONStr := JSONStr + '    "sheet_style": "A4",' + #13#10;
@@ -198,7 +183,7 @@ Begin
                     End;
                     JSONStr := JSONStr + '      "value": "' + EscapeJsonString(ValueStr) + '",' + #13#10;
                     
-                    // Library reference (component name in library)
+                    // Library reference
                     Try
                         LibRefStr := Component.LibReference;
                     Except
@@ -219,7 +204,6 @@ Begin
                         FootprintStr := Component.Footprint;
                         If FootprintStr = '' Then
                         Begin
-                            // Try to get from parameters
                             For I := 0 To Component.ParameterCount - 1 Do
                             Begin
                                 Parameter := Component.SchParameters(I);
@@ -245,7 +229,7 @@ Begin
                         JSONStr := JSONStr + '      "location": {"x": 0, "y": 0},' + #13#10;
                     End;
                     
-                    // Orientation/Rotation
+                    // Orientation
                     Try
                         JSONStr := JSONStr + '      "orientation": ' + IntToStr(Component.Orientation) + ',' + #13#10;
                     Except
@@ -365,7 +349,7 @@ Begin
                     
                     JSONStr := JSONStr + '    {' + #13#10;
                     
-                    // Vertices (wire can have multiple segments)
+                    // Vertices
                     JSONStr := JSONStr + '      "vertices": [' + #13#10;
                     Try
                         For I := 1 To Wire.VerticesCount Do
@@ -532,7 +516,7 @@ Begin
                     Except
                         JSONStr := JSONStr + '      "name": "",' + #13#10;
                         JSONStr := JSONStr + '      "io_type": "",' + #13#10;
-                        JSONStr := JSONStr + '      "location": {"x": 0, "y": 0}' + #13#10;
+                        JSONStr := JSONStr + '      "location": {"x": 0, "y": 0}"' + #13#10;
                     End;
                     
                     JSONStr := JSONStr + '    }';
@@ -563,7 +547,7 @@ Begin
     OutputFile := TStringList.Create;
     Try
         OutputFile.Text := JSONStr;
-        FileName := 'E:\Workspace\AI\11.10.WayNe\new-version\schematic_info.json';
+        FileName := BASE_PATH + 'schematic_info.json';
         
         Try
             OutputFile.SaveToFile(FileName);
@@ -580,4 +564,3 @@ Begin
         OutputFile.Free;
     End;
 End;
-

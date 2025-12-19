@@ -10,7 +10,7 @@ ReleaseBaseFolder=
 TemplateLocationPath=
 
 [Document1]
-DocumentPath=altium_export_pcb_info.pas
+DocumentPath=RUN.pas
 AnnotationEnabled=1
 AnnotateStartValue=1
 AnnotationIndexControlEnabled=0
@@ -25,7 +25,7 @@ ClassGenNCAutoScope=None
 DItemRevisionGUID=
 
 [Document2]
-DocumentPath=altium_export_schematic_info.pas
+DocumentPath=altium_export_pcb_info.pas
 AnnotationEnabled=1
 AnnotateStartValue=1
 AnnotationIndexControlEnabled=0
@@ -40,7 +40,7 @@ ClassGenNCAutoScope=None
 DItemRevisionGUID=
 
 [Document3]
-DocumentPath=altium_execute_commands.pas
+DocumentPath=altium_export_schematic_info.pas
 AnnotationEnabled=1
 AnnotateStartValue=1
 AnnotationIndexControlEnabled=0

@@ -3,6 +3,7 @@ Agent Page - Professional Chat Interface
 Main interaction page for EagilinsED
 """
 import customtkinter as ctk
+import tkinter
 from mcp_client import AltiumMCPClient
 from llm_client import LLMClient
 from agent_orchestrator import AgentOrchestrator
@@ -93,12 +94,14 @@ class AgentPage(ctk.CTkFrame):
         self.on_back = on_back
         self.messages = []
         self.is_loading = False
+        self.is_destroyed = False  # Track if widget is destroyed
         
         # Color scheme (matching welcome page)
         self.colors = {
             "bg_dark": "#0f172a",
             "bg_card": "#1e293b",
             "bg_input": "#334155",
+            "bg_hover": "#475569",
             "border": "#475569",
             "primary": "#3b82f6",
             "primary_hover": "#2563eb",
@@ -254,39 +257,12 @@ class AgentPage(ctk.CTkFrame):
             command=self.send_message
         )
         self.send_button.grid(row=0, column=1, padx=(0, 5), pady=5)
-        
-        # Quick actions (optional hints)
-        hints_frame = ctk.CTkFrame(input_container, fg_color="transparent")
-        hints_frame.grid(row=1, column=0, padx=20, pady=(0, 10), sticky="w")
-        
-        hints = ["Analyze schematic", "Generate layout", "Review design"]
-        for hint in hints:
-            hint_btn = ctk.CTkButton(
-                hints_frame,
-                text=hint,
-                font=ctk.CTkFont(size=10),
-                height=22,
-                corner_radius=11,
-                fg_color="transparent",
-                hover_color=self.colors["bg_input"],
-                border_width=1,
-                border_color=self.colors["border"],
-                text_color=self.colors["text_dim"],
-                command=lambda h=hint: self.quick_action(h)
-            )
-            hint_btn.pack(side="left", padx=(0, 8))
     
     def add_welcome_message(self):
         """Add professional welcome message"""
-        welcome = """Welcome to EagilinsED, your intelligent PCB design co-pilot.
+        welcome = """Hi! I'm EagilinsED, your PCB design assistant.
 
-I can help you with:
-• Analyze - Identify functional blocks and design patterns
-• Generate Layout - Create autonomous component placement
-• Review - Find issues and suggest improvements
-• Strategy - Recommend placement and routing approaches
-
-Try asking: "Analyze this schematic" or "Generate layout for this design" """
+I help with project creation, design analysis, layout generation, and command execution."""
         
         self.add_message(welcome, is_user=False)
     
@@ -304,12 +280,6 @@ Try asking: "Analyze this schematic" or "Generate layout for this design" """
         self.chat_frame._parent_canvas.yview_moveto(1.0)
         
         return msg
-    
-    def quick_action(self, action: str):
-        """Handle quick action button click"""
-        self.input_entry.delete(0, "end")
-        self.input_entry.insert(0, action)
-        self.send_message()
     
     def send_message(self):
         """Send user message"""
@@ -366,22 +336,22 @@ Try asking: "Analyze this schematic" or "Generate layout for this design" """
             self.messages.append(streaming_msg)
             
             # Scroll
-            self.after(0, lambda: self.chat_frame._parent_canvas.yview_moveto(1.0))
+            self._safe_after(0, lambda: self.chat_frame._parent_canvas.yview_moveto(1.0))
             
             # Stream callback
             def on_chunk(chunk: str):
-                if chunk:
-                    self.after(0, lambda c=chunk: streaming_msg.append_text(c))
-                    self.after(0, lambda: self.chat_frame._parent_canvas.yview_moveto(1.0))
+                if chunk and not self.is_destroyed:
+                    self._safe_after(0, lambda c=chunk: streaming_msg.append_text(c))
+                    self._safe_after(0, lambda: self.chat_frame._parent_canvas.yview_moveto(1.0))
             
             # Process
             response, status, is_exec = self.agent.process_query(text, stream_callback=on_chunk)
             
             # Update UI
-            self.after(0, lambda: self.on_response_complete(response, status, is_exec, streaming_msg))
+            self._safe_after(0, lambda: self.on_response_complete(response, status, is_exec, streaming_msg))
             
         except Exception as e:
-            self.after(0, lambda: self.on_response_complete(f"Error: {e}", "error", False, None))
+            self._safe_after(0, lambda: self.on_response_complete(f"Error: {e}", "error", False, None))
     
     def on_response_complete(self, response: str, status: str, is_exec: bool, msg: ChatMessage):
         """Handle response completion"""
@@ -389,6 +359,9 @@ Try asking: "Analyze this schematic" or "Generate layout for this design" """
             msg.set_text(response)
         elif not msg:
             self.add_message(response, is_user=False)
+        
+        # Always re-enable input first
+        self.set_loading(False)
         
         # Update status
         if status == "error":
@@ -399,8 +372,6 @@ Try asking: "Analyze this schematic" or "Generate layout for this design" """
             self.set_status("Analysis Complete", "success")
         else:
             self.set_status("Ready", "success")
-        
-        self.set_loading(False)
         
         # Final scroll
         self.chat_frame.update()
@@ -418,8 +389,27 @@ Try asking: "Analyze this schematic" or "Generate layout for this design" """
         self.add_welcome_message()
         self.set_status("Ready", "success")
     
+    def _safe_after(self, delay_ms: int, func):
+        """Safely schedule after() callback, checking if widget is still alive"""
+        if self.is_destroyed:
+            return
+        try:
+            # Check if widget still exists and has valid tkinter window
+            if hasattr(self, 'winfo_exists') and self.winfo_exists():
+                self.after(delay_ms, func)
+        except (AttributeError, RuntimeError, tkinter.TclError):
+            # Widget is destroyed or invalid, ignore
+            self.is_destroyed = True
+            pass
+    
     def go_back(self):
         """Go back to project setup page"""
+        self.is_destroyed = True  # Mark as destroyed to prevent callbacks
         self.clear_chat()
         if self.on_back:
             self.on_back()
+    
+    def destroy(self):
+        """Override destroy to mark as destroyed"""
+        self.is_destroyed = True
+        super().destroy()

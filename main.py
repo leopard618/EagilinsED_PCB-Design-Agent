@@ -6,8 +6,6 @@ import customtkinter as ctk
 import logging
 import sys
 from pages.welcome_page import WelcomePage
-from pages.guidelines_page import GuidelinesPage
-from pages.project_setup_page import ProjectSetupPage
 from pages.agent_page import AgentPage
 from config import WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE
 from mcp_client import AltiumMCPClient
@@ -41,15 +39,51 @@ class EagilinsEDApp(ctk.CTk):
         # Store MCP client and project mode
         self.mcp_client = None
         self.project_mode = None  # "existing" or "new"
+        self.project_name = None  # Store project name for new projects
         
         # Show welcome page
         self.show_welcome_page()
     
+    def _safe_destroy_widgets(self):
+        """Safely destroy all child widgets"""
+        widgets = list(self.winfo_children())
+        
+        # First, mark all widgets as destroyed to prevent new callbacks
+        for widget in widgets:
+            try:
+                if hasattr(widget, 'is_destroyed'):
+                    widget.is_destroyed = True
+                # Stop any animations or active processes
+                if hasattr(widget, 'loading_active'):
+                    widget.loading_active = False
+                if hasattr(widget, '_stop_loading'):
+                    try:
+                        widget._stop_loading()
+                    except:
+                        pass
+            except:
+                pass
+        
+        # Process pending events to let callbacks complete
+        try:
+            self.update_idletasks()
+        except:
+            pass
+        
+        # Now destroy widgets with proper exception handling
+        for widget in widgets:
+            try:
+                if hasattr(widget, 'winfo_exists') and widget.winfo_exists():
+                    widget.destroy()
+            except Exception:
+                # Widget may already be destroyed or in invalid state
+                # This is safe to ignore
+                pass
+    
     def show_welcome_page(self):
         """Show welcome and connection page"""
-        # Clear existing widgets
-        for widget in self.winfo_children():
-            widget.destroy()
+        # Clear existing widgets safely
+        self._safe_destroy_widgets()
         
         welcome_page = WelcomePage(
             self,
@@ -61,47 +95,20 @@ class EagilinsEDApp(ctk.CTk):
         """Callback when connection is successful"""
         logger.info("MCP connection established successfully")
         self.mcp_client = mcp_client
-        self.show_project_setup_page()
-    
-    def show_project_setup_page(self):
-        """Show project setup page - ask user about existing or new project"""
-        # Clear existing widgets
-        for widget in self.winfo_children():
-            widget.destroy()
-        
-        project_setup_page = ProjectSetupPage(
-            self,
-            self.mcp_client,
-            on_continue=self.on_project_setup_complete
-        )
-        project_setup_page.pack(fill="both", expand=True)
-    
-    def on_project_setup_complete(self, project_mode: str):
-        """Callback when project setup is complete"""
-        logger.info(f"Project mode selected: {project_mode}")
-        self.project_mode = project_mode
-        self.show_guidelines_page()
-    
-    def show_guidelines_page(self):
-        """Show guidelines page"""
-        # Clear existing widgets
-        for widget in self.winfo_children():
-            widget.destroy()
-        
-        guidelines_page = GuidelinesPage(
-            self,
-            on_next=self.show_agent_page
-        )
-        guidelines_page.pack(fill="both", expand=True)
+        # Go directly to agent page - all configuration via natural language
+        self.show_agent_page()
     
     def show_agent_page(self):
         """Show main agent page"""
-        # Clear existing widgets
-        for widget in self.winfo_children():
-            widget.destroy()
+        # Clear existing widgets safely
+        self._safe_destroy_widgets()
         
         if self.mcp_client:
-            agent_page = AgentPage(self, self.mcp_client, on_back=self.show_project_setup_page)
+            agent_page = AgentPage(
+                self, 
+                self.mcp_client, 
+                on_back=self.show_welcome_page
+            )
             agent_page.pack(fill="both", expand=True)
         else:
             # Fallback: show welcome page if no client

@@ -3,6 +3,7 @@ Welcome Page - Professional Interface
 Main entry point for EagilinsED
 """
 import customtkinter as ctk
+import tkinter
 from mcp_client import AltiumMCPClient
 from config import WINDOW_WIDTH, WINDOW_HEIGHT
 import threading
@@ -18,6 +19,7 @@ class WelcomePage(ctk.CTkFrame):
         self.on_connect_success = on_connect_success
         self.mcp_client = AltiumMCPClient()
         self.loading_active = False
+        self.is_destroyed = False  # Track if widget is destroyed
         self.spinner_dots = 0
         
         # Color scheme
@@ -231,15 +233,27 @@ class WelcomePage(ctk.CTkFrame):
     
     def _animate_spinner(self):
         """Animate loading spinner"""
-        if not self.loading_active:
+        if not self.loading_active or self.is_destroyed:
             return
         
-        states = ["●  ○  ○", "○  ●  ○", "○  ○  ●"]
-        self.spinner_dots = (self.spinner_dots + 1) % len(states)
-        self.spinner_label.configure(text=states[self.spinner_dots])
-        
-        if self.loading_active:
-            self.after(350, self._animate_spinner)
+        try:
+            # Check if widget still exists
+            if not hasattr(self, 'winfo_exists') or not self.winfo_exists():
+                self.is_destroyed = True
+                return
+            
+            states = ["●  ○  ○", "○  ●  ○", "○  ○  ●"]
+            self.spinner_dots = (self.spinner_dots + 1) % len(states)
+            self.spinner_label.configure(text=states[self.spinner_dots])
+            
+            if self.loading_active and not self.is_destroyed:
+                if hasattr(self, 'winfo_exists') and self.winfo_exists():
+                    self.after(350, self._animate_spinner)
+        except (AttributeError, RuntimeError, tkinter.TclError):
+            # Widget is destroyed or invalid
+            self.is_destroyed = True
+            self.loading_active = False
+            pass
     
     def _start_loading(self):
         """Start loading state"""
@@ -268,9 +282,17 @@ class WelcomePage(ctk.CTkFrame):
         def connect_thread():
             try:
                 success, message = self.mcp_client.connect_simple()
-                self.after(0, self._on_connect_complete, success, message)
+                if not self.is_destroyed and hasattr(self, 'winfo_exists') and self.winfo_exists():
+                    try:
+                        self.after(0, self._on_connect_complete, success, message)
+                    except (AttributeError, RuntimeError, tkinter.TclError):
+                        self.is_destroyed = True
             except Exception as e:
-                self.after(0, self._on_connect_complete, False, str(e))
+                if not self.is_destroyed and hasattr(self, 'winfo_exists') and self.winfo_exists():
+                    try:
+                        self.after(0, self._on_connect_complete, False, str(e))
+                    except (AttributeError, RuntimeError, tkinter.TclError):
+                        self.is_destroyed = True
         
         threading.Thread(target=connect_thread, daemon=True).start()
     
@@ -281,7 +303,11 @@ class WelcomePage(ctk.CTkFrame):
         if success:
             self.status_icon.configure(text="●", text_color=self.colors["success"])
             self.status_label.configure(text="Connected", text_color=self.colors["success"])
-            self.after(500, lambda: self.on_connect_success(self.mcp_client) if self.on_connect_success else None)
+            if not self.is_destroyed and hasattr(self, 'winfo_exists') and self.winfo_exists():
+                try:
+                    self.after(500, lambda: self.on_connect_success(self.mcp_client) if self.on_connect_success and not self.is_destroyed and hasattr(self, 'winfo_exists') and self.winfo_exists() else None)
+                except (AttributeError, RuntimeError, tkinter.TclError):
+                    self.is_destroyed = True
         else:
             self.status_icon.configure(text="●", text_color=self.colors["error"])
             self.status_label.configure(text="Connection failed", text_color=self.colors["error"])
@@ -291,3 +317,9 @@ class WelcomePage(ctk.CTkFrame):
     def get_mcp_client(self):
         """Get MCP client instance"""
         return self.mcp_client
+    
+    def destroy(self):
+        """Override destroy to mark as destroyed"""
+        self.is_destroyed = True
+        self.loading_active = False  # Stop spinner
+        super().destroy()

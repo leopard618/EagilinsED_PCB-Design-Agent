@@ -375,7 +375,7 @@ class AltiumMCPClient:
                 result = response.json()
                 
                 if isinstance(result, dict):
-                    result["message"] = "Command queued. Please run altium_execute_commands.pas in Altium Designer to execute it."
+                    result["message"] = "Command queued. Please run main.pas → ShowCommand in Altium Designer to see which script to run."
                 
                 return result
             return None

@@ -1,17 +1,13 @@
 {*
- * Altium Designer Script to Export Comprehensive PCB Information
- * Compatible with Altium Designer 25.8.1
- * Exports ALL properties for components, nets, tracks, vias, and other PCB objects
- * 
- * TO RUN THIS SCRIPT:
- * 1. Click on the PCB document tab to make it active
- * 2. In Altium Designer, go to: File -> Run Script
- * 3. Select this file: altium_export_pcb_info.pas
- * 4. When dialog appears, select "ExportPCBInfo" procedure
- * 5. Click OK
+ * Export PCB Info Command
+ * Exports comprehensive PCB information to pcb_info.json
+ * Command: export_pcb_info
  *}
 
-// Helper function to escape JSON strings (escape quotes, backslashes, etc.)
+Const
+    BASE_PATH = 'E:\Workspace\AI\11.10.WayNe\new-version\';
+
+// Helper function to escape JSON strings
 Function EscapeJsonString(InputStr: String): String;
 Var
     I: Integer;
@@ -33,7 +29,6 @@ Begin
         Else If Ch = #9 Then
             ResultStr := ResultStr + '\t'
         Else If (Ord(Ch) < 32) Or (Ord(Ch) > 126) Then
-            // Non-printable or non-ASCII characters - skip or replace
             ResultStr := ResultStr + '?'
         Else
             ResultStr := ResultStr + Ch;
@@ -51,21 +46,15 @@ Var
     Via           : IPCB_Via;
     Track         : IPCB_Track;
     Pad           : IPCB_Pad;
-    Arc           : IPCB_Arc;
-    Region        : IPCB_Region;
-    Pin           : IPCB_Pin;
     Layer         : TLayer;
     LayerCount    : Integer;
     ComponentCount: Integer;
     NetCount      : Integer;
     ViaCount      : Integer;
     TrackCount    : Integer;
-    PadCount      : Integer;
-    ArcCount      : Integer;
-    RegionCount   : Integer;
     BoardRect     : TCoordRect;
     Width, Height : Double;
-    I, J          : Integer;
+    I             : Integer;
     JSONStr       : String;
     Doc           : IDocument;
     Workspace     : IWorkspace;
@@ -78,13 +67,11 @@ Var
     NetName       : String;
     LayerName     : String;
     BoundingRect  : TCoordRect;
-    PinObj        : IPCB_Pin;
     TempStr       : String;
     FirstItem     : Boolean;
     InnerFirstItem: Boolean;
     NetFirstItem  : Boolean;
 Begin
-
     // Get workspace
     Try
         Workspace := GetWorkspace;
@@ -130,9 +117,6 @@ Begin
     NetCount := 0;
     ViaCount := 0;
     TrackCount := 0;
-    PadCount := 0;
-    ArcCount := 0;
-    RegionCount := 0;
     LayerCount := 0;
 
     // Build comprehensive JSON string
@@ -152,7 +136,7 @@ Begin
     If FileName = '' Then
         FileName := 'Unknown';
     
-                JSONStr := JSONStr + '  "file_name": "' + EscapeJsonString(FileName) + '",' + #13#10;
+    JSONStr := JSONStr + '  "file_name": "' + EscapeJsonString(FileName) + '",' + #13#10;
     
     // Get board size
     Try
@@ -180,7 +164,7 @@ Begin
     JSONStr := JSONStr + '    "area_mm2": ' + FormatFloat('0.00', Width * Height) + #13#10;
     JSONStr := JSONStr + '  },' + #13#10;
     
-    // ========== COMPONENTS WITH ALL PROPERTIES ==========
+    // ========== COMPONENTS ==========
     JSONStr := JSONStr + '  "components": [' + #13#10;
     Try
         Iterator := PCB.BoardIterator_Create;
@@ -263,7 +247,7 @@ Begin
                 End;
                 JSONStr := JSONStr + '      "footprint": "' + EscapeJsonString(TempStr) + '",' + #13#10;
                 
-                // Moveable (Locked property not available in Altium API)
+                // Moveable
                 Try
                     If Component.Moveable Then
                         TempStr := 'true'
@@ -274,17 +258,14 @@ Begin
                     JSONStr := JSONStr + '      "moveable": true,' + #13#10;
                 End;
                 
-                // Parameters - Try to get Value from Comment
+                // Parameters
                 JSONStr := JSONStr + '      "parameters": [';
                 Try
                     FirstItem := True;
-                    // Try to get Value from Component.Comment.Text
-                    // In Altium, component values are often stored in the Comment field
                     Try
                         TempStr := Component.Comment.Text;
                         If (TempStr <> '') And (TempStr <> CompName) Then
                         Begin
-                            // This is likely the component value
                             If Not FirstItem Then
                                 JSONStr := JSONStr + ',';
                             FirstItem := False;
@@ -294,18 +275,12 @@ Begin
                             JSONStr := JSONStr + '        }';
                         End;
                     Except
-                        // Comment property not available or failed
                     End;
                 Except
-                    // Parameters section failed, leave empty
                 End;
                 JSONStr := JSONStr + #13#10 + '      ],' + #13#10;
                 
-                // Pins (Note: PinCount property not available in Altium API)
-                // Pins/pads are accessed through the board iterator, but for efficiency,
-                // we'll collect them separately or skip for now
                 JSONStr := JSONStr + '      "pins": []' + #13#10;
-                
                 JSONStr := JSONStr + '    }';
                 
                 Component := Iterator.NextPCBObject;
@@ -318,7 +293,7 @@ Begin
     End;
     JSONStr := JSONStr + #13#10 + '  ],' + #13#10;
     
-    // ========== NETS WITH ALL PROPERTIES ==========
+    // ========== NETS ==========
     JSONStr := JSONStr + '  "nets": [' + #13#10;
     Try
         Iterator := PCB.BoardIterator_Create;
@@ -347,11 +322,10 @@ Begin
                 End;
                 JSONStr := JSONStr + '      "name": "' + EscapeJsonString(NetName) + '",' + #13#10;
                 
-                // Connected components (find by iterating through pads)
+                // Connected components
                 JSONStr := JSONStr + '      "connected_components": [';
                 Try
                     InnerFirstItem := True;
-                    // Iterate through all pads to find which components are connected to this net
                     InnerIterator := PCB.BoardIterator_Create;
                     Try
                         InnerIterator.AddFilter_ObjectSet(MkSet(ePadObject));
@@ -362,17 +336,14 @@ Begin
                         While Pad <> Nil Do
                         Begin
                             Try
-                                // Check if this pad is connected to the current net
                                 If (Pad.Net <> Nil) And (Pad.Net.Name = NetName) Then
                                 Begin
-                                    // Get the component this pad belongs to
                                     If (Pad.Component <> Nil) Then
                                     Begin
                                         Try
                                             TempStr := Pad.Component.Name.Text;
                                             If TempStr <> '' Then
                                             Begin
-                                                // Check if we already added this component
                                                 If InnerFirstItem Or (Pos('"' + TempStr + '"', JSONStr) = 0) Then
                                                 Begin
                                                     If Not InnerFirstItem Then
@@ -396,7 +367,7 @@ Begin
                 End;
                 JSONStr := JSONStr + '],' + #13#10;
                 
-                // Track count for this net
+                // Track count
                 Try
                     I := 0;
                     InnerIterator := PCB.BoardIterator_Create;
@@ -419,7 +390,7 @@ Begin
                 End;
                 JSONStr := JSONStr + '      "track_count": ' + IntToStr(I) + ',' + #13#10;
                 
-                // Via count for this net
+                // Via count
                 Try
                     I := 0;
                     InnerIterator := PCB.BoardIterator_Create;
@@ -454,7 +425,7 @@ Begin
     End;
     JSONStr := JSONStr + #13#10 + '  ],' + #13#10;
     
-    // ========== TRACKS WITH ALL PROPERTIES ==========
+    // ========== TRACKS ==========
     JSONStr := JSONStr + '  "tracks": [' + #13#10;
     Try
         Iterator := PCB.BoardIterator_Create;
@@ -475,7 +446,6 @@ Begin
                 
                 JSONStr := JSONStr + '    {' + #13#10;
                 
-                // Start position
                 Try
                     JSONStr := JSONStr + '      "start": {' + #13#10;
                     JSONStr := JSONStr + '        "x_mm": ' + FormatFloat('0.00', CoordToMMs(Track.X1)) + ',' + #13#10;
@@ -485,7 +455,6 @@ Begin
                     JSONStr := JSONStr + '      "start": {"x_mm": 0, "y_mm": 0},' + #13#10;
                 End;
                 
-                // End position
                 Try
                     JSONStr := JSONStr + '      "end": {' + #13#10;
                     JSONStr := JSONStr + '        "x_mm": ' + FormatFloat('0.00', CoordToMMs(Track.X2)) + ',' + #13#10;
@@ -495,14 +464,12 @@ Begin
                     JSONStr := JSONStr + '      "end": {"x_mm": 0, "y_mm": 0},' + #13#10;
                 End;
                 
-                // Width
                 Try
                     JSONStr := JSONStr + '      "width_mm": ' + FormatFloat('0.00', CoordToMMs(Track.Width)) + ',' + #13#10;
                 Except
                     JSONStr := JSONStr + '      "width_mm": 0,' + #13#10;
                 End;
                 
-                // Layer
                 Try
                     LayerName := Layer2String(Track.Layer);
                     If LayerName = '' Then LayerName := 'Layer ' + IntToStr(Track.Layer);
@@ -511,7 +478,6 @@ Begin
                 End;
                 JSONStr := JSONStr + '      "layer": "' + EscapeJsonString(LayerName) + '",' + #13#10;
                 
-                // Net
                 Try
                     If Track.Net <> Nil Then
                         NetName := Track.Net.Name
@@ -534,7 +500,7 @@ Begin
     End;
     JSONStr := JSONStr + #13#10 + '  ],' + #13#10;
     
-    // ========== VIAS WITH ALL PROPERTIES ==========
+    // ========== VIAS ==========
     JSONStr := JSONStr + '  "vias": [' + #13#10;
     Try
         Iterator := PCB.BoardIterator_Create;
@@ -555,7 +521,6 @@ Begin
                 
                 JSONStr := JSONStr + '    {' + #13#10;
                 
-                // Position
                 Try
                     JSONStr := JSONStr + '      "position": {' + #13#10;
                     JSONStr := JSONStr + '        "x_mm": ' + FormatFloat('0.00', CoordToMMs(Via.X)) + ',' + #13#10;
@@ -565,26 +530,21 @@ Begin
                     JSONStr := JSONStr + '      "position": {"x_mm": 0, "y_mm": 0},' + #13#10;
                 End;
                 
-                // Size
                 Try
                     JSONStr := JSONStr + '      "size_mm": ' + FormatFloat('0.00', CoordToMMs(Via.Size)) + ',' + #13#10;
                 Except
                     JSONStr := JSONStr + '      "size_mm": 0,' + #13#10;
                 End;
                 
-                // Hole size
                 Try
                     JSONStr := JSONStr + '      "hole_size_mm": ' + FormatFloat('0.00', CoordToMMs(Via.HoleSize)) + ',' + #13#10;
                 Except
                     JSONStr := JSONStr + '      "hole_size_mm": 0,' + #13#10;
                 End;
                 
-                // Layer information (TopLayer/BottomLayer properties not available in Altium API)
-                // Vias span multiple layers, so we'll mark them as multi-layer
                 JSONStr := JSONStr + '      "start_layer": "Multi-Layer",' + #13#10;
                 JSONStr := JSONStr + '      "end_layer": "Multi-Layer",' + #13#10;
                 
-                // Net
                 Try
                     If Via.Net <> Nil Then
                         NetName := Via.Net.Name
@@ -607,7 +567,7 @@ Begin
     End;
     JSONStr := JSONStr + #13#10 + '  ],' + #13#10;
     
-    // Count and collect layer information
+    // Count layers
     JSONStr := JSONStr + '  "layers": [';
     Try
         FirstItem := True;
@@ -637,7 +597,7 @@ Begin
     End;
     JSONStr := JSONStr + #13#10 + '  ],' + #13#10;
     
-    // Add statistics
+    // Statistics
     JSONStr := JSONStr + '  "statistics": {' + #13#10;
     JSONStr := JSONStr + '    "layer_count": ' + IntToStr(LayerCount) + ',' + #13#10;
     JSONStr := JSONStr + '    "component_count": ' + IntToStr(ComponentCount) + ',' + #13#10;
@@ -653,24 +613,18 @@ Begin
     PCBFile := TStringList.Create;
     Try
         PCBFile.Text := JSONStr;
-        
-        // Save to fixed location
-        FileName := 'E:\Workspace\AI\11.10.WayNe\new-version\pcb_info.json';
+        FileName := BASE_PATH + 'pcb_info.json';
         
         Try
-            // Save with UTF-8 encoding (TStringList should handle this, but ensure it)
             PCBFile.SaveToFile(FileName);
-            // Note: TStringList.SaveToFile in DelphiScript may use system default encoding
-            // If encoding issues occur, the Python server will try multiple encodings
             ShowMessage('SUCCESS! Comprehensive PCB information exported to:' + #13#10 + FileName + #13#10 + #13#10 +
-                        'Components: ' + IntToStr(ComponentCount) + ' (with all properties, parameters, pins)' + #13#10 +
-                        'Nets: ' + IntToStr(NetCount) + ' (with connected components, track/via counts)' + #13#10 +
-                        'Tracks: ' + IntToStr(TrackCount) + ' (with start/end positions, width, layer, net)' + #13#10 +
-                        'Vias: ' + IntToStr(ViaCount) + ' (with position, size, layers, net)' + #13#10 +
+                        'Components: ' + IntToStr(ComponentCount) + #13#10 +
+                        'Nets: ' + IntToStr(NetCount) + #13#10 +
+                        'Tracks: ' + IntToStr(TrackCount) + #13#10 +
+                        'Vias: ' + IntToStr(ViaCount) + #13#10 +
                         'Layers: ' + IntToStr(LayerCount));
         Except
-            ShowMessage('ERROR: Could not save file to:' + #13#10 + FileName + #13#10 + #13#10 +
-                        'Check if the directory exists and you have write permissions.');
+            ShowMessage('ERROR: Could not save file to:' + #13#10 + FileName);
         End;
     Finally
         PCBFile.Free;

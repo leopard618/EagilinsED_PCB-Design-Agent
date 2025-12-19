@@ -1,9 +1,9 @@
 [
   {
-    "command": "modify_pcb",
+    "command": "create_project",
     "parameters": {
-      "request": "move R123 to 76, 69"
+      "project_name": "TEST_Project"
     },
-    "timestamp": 1765766056.525193
+    "timestamp": 1766151275.5425763
   }
 ]

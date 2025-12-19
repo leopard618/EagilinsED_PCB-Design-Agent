@@ -25,8 +25,8 @@ class AppReloadHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         
-        # Only watch Python files and relevant config files
-        if not event.src_path.endswith(('.py', '.json', '.env')):
+        # Only watch Python files
+        if not event.src_path.endswith('.py'):
             return
         
         # Ignore changes in __pycache__ and venv

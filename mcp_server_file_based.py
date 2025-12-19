@@ -476,7 +476,7 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
                 
                 self._send_json_response({
                     "success": True,
-                    "message": "Command queued. Please run altium_execute_commands.pas in Altium Designer to execute it.",
+                    "message": "Command queued. Please run main.pas → ShowCommand in Altium Designer to see which script to run.",
                     "command_file": commands_file
                 })
             except Exception as e:
@@ -519,7 +519,7 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
                 
                 self._send_json_response({
                     "success": True,
-                    "message": "Command queued. Please run altium_execute_commands.pas in Altium Designer to execute it.",
+                    "message": "Command queued. Please run main.pas → ShowCommand in Altium Designer to see which script to run.",
                     "command_file": commands_file
                 })
             except Exception as e:
@@ -562,7 +562,7 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
                 
                 self._send_json_response({
                     "success": True,
-                    "message": "Command queued. Please run altium_schematic_modify.pas in Altium Designer to execute it.",
+                    "message": "Command queued. Please run main.pas → ShowCommand in Altium Designer to see which script to run.",
                     "command_file": commands_file
                 })
             except Exception as e:

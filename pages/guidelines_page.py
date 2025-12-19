@@ -12,6 +12,7 @@ class GuidelinesPage(ctk.CTkFrame):
         super().__init__(parent, width=WINDOW_WIDTH, height=WINDOW_HEIGHT)
         self.parent = parent
         self.on_next = on_next
+        self.is_destroyed = False
         
         # Color scheme (matching other pages)
         self.colors = {
@@ -135,3 +136,8 @@ class GuidelinesPage(ctk.CTkFrame):
         """Navigate to next page"""
         if self.on_next:
             self.on_next()
+    
+    def destroy(self):
+        """Override destroy to mark as destroyed"""
+        self.is_destroyed = True
+        super().destroy()
