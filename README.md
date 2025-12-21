@@ -56,5 +56,5 @@ OPENAI_API_KEY=your-key
 
 ## Documentation
 
-See `TESTING_GUIDE.md` for detailed testing instructions.
+See `SCRIPT_GUIDE.md` for detailed script structure and usage instructions.
 

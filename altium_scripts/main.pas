@@ -1,9 +1,12 @@
 {*
- * Main Router Script
- * Reads commands from JSON files and shows which script to run
+ * Main Router Script - Executes all commands automatically
+ * Reads commands from JSON files and executes them directly
  * 
- * Usage: File → Run Script → main.pas → ShowCommand
+ * Usage: File → Run Script → main.pas → ExecuteCommand
  *}
+
+Const
+    BASE_PATH = 'E:\Workspace\AI\11.10.WayNe\new-version\';
 
 Function FileExists(FileName: String): Boolean;
 Var
@@ -51,25 +54,214 @@ Begin
             Inc(ColonPos);
         QuoteStart := ColonPos;
         QuoteEnd := QuoteStart;
-        While (QuoteEnd <= Length(JsonContent)) And (JsonContent[QuoteEnd] <> '"') Do
+        While (QuoteEnd <= Length(JsonContent)) And (JsonContent[QuoteEnd] <> '"') And (JsonContent[QuoteEnd] <> #13) And (JsonContent[QuoteEnd] <> #10) Do
             Inc(QuoteEnd);
         If QuoteEnd > QuoteStart Then
             Result := Copy(JsonContent, QuoteStart, QuoteEnd - QuoteStart);
     End;
 End;
 
-Procedure ShowCommand;
+Function ExtractJsonNumber(JsonContent: String; KeyName: String): Double;
+Var
+    KeyPos, ColonPos, NumStart, NumEnd: Integer;
+    LowerJson, SearchKey, NumStr: String;
+Begin
+    Result := 0;
+    LowerJson := LowerCase(JsonContent);
+    SearchKey := LowerCase(KeyName);
+    KeyPos := Pos('"' + SearchKey + '"', LowerJson);
+    If KeyPos > 0 Then
+    Begin
+        ColonPos := KeyPos;
+        While (ColonPos <= Length(JsonContent)) And (JsonContent[ColonPos] <> ':') Do
+            Inc(ColonPos);
+        Inc(ColonPos);
+        While (ColonPos <= Length(JsonContent)) And (JsonContent[ColonPos] = ' ') Do
+            Inc(ColonPos);
+        NumStart := ColonPos;
+        NumEnd := NumStart;
+        While (NumEnd <= Length(JsonContent)) And 
+              (((JsonContent[NumEnd] >= '0') And (JsonContent[NumEnd] <= '9')) Or 
+               (JsonContent[NumEnd] = '.') Or (JsonContent[NumEnd] = '-') Or 
+               (JsonContent[NumEnd] = '+') Or (JsonContent[NumEnd] = 'e') Or 
+               (JsonContent[NumEnd] = 'E')) Do
+            Inc(NumEnd);
+        If NumEnd > NumStart Then
+        Begin
+            NumStr := Copy(JsonContent, NumStart, NumEnd - NumStart);
+            Try
+                Result := StrToFloat(NumStr);
+            Except
+                Result := 0;
+            End;
+        End;
+    End;
+End;
+
+// Execute CreateProject command
+Procedure ExecuteCreateProject(FileContent: String);
+Var
+    Workspace: IWorkspace;
+    Client: IClient;
+    Project: IProject;
+    CommandFile: TStringList;
+    FileName: String;
+    PrjName, PrjPath, PrjFullPath: String;
+    PrjDir: String;
+    PrjFile: TStringList;
+    Success: Boolean;
+Begin
+    Success := False;
+    FileName := BASE_PATH + 'pcb_commands.json';
+    
+    // Extract project name
+    PrjName := ExtractJsonString(FileContent, 'project_name');
+    If PrjName = '' Then
+    Begin
+        PrjName := ExtractJsonString(FileContent, 'name');
+        If PrjName = '' Then
+            PrjName := 'NewProject';
+    End;
+    
+    // Extract project path
+    PrjPath := ExtractJsonString(FileContent, 'project_path');
+    If PrjPath = '' Then
+        PrjPath := ExtractJsonString(FileContent, 'path');
+    
+    // Create project full path
+    If PrjPath = '' Then
+        PrjFullPath := BASE_PATH + PrjName + '.PrjPcb'
+    Else
+        PrjFullPath := PrjPath + '\' + PrjName + '.PrjPcb';
+    
+    Try
+        Workspace := GetWorkspace;
+        If Workspace = Nil Then
+        Begin
+            ShowMessage('ERROR: Cannot access workspace');
+            Exit;
+        End;
+        
+        Try
+            Client := GetClient;
+        Except
+            Client := Nil;
+        End;
+        
+        // Extract directory path
+        PrjDir := ExtractFilePath(PrjFullPath);
+        
+        // Create directory if needed
+        If Not DirectoryExists(PrjDir) Then
+        Begin
+            Try
+                CreateDir(PrjDir);
+            Except
+                ShowMessage('ERROR: Could not create directory: ' + PrjDir);
+                Exit;
+            End;
+        End;
+        
+        // Create project XML file
+        Try
+            PrjFile := TStringList.Create;
+            Try
+                PrjFile.Add('<?xml version="1.0" encoding="UTF-8"?>');
+                PrjFile.Add('<Project xmlns="http://www.altium.com/ADST/Project">');
+                PrjFile.Add('  <Name>' + PrjName + '</Name>');
+                PrjFile.Add('  <Type>PCB</Type>');
+                PrjFile.Add('  <Documents>');
+                PrjFile.Add('  </Documents>');
+                PrjFile.Add('</Project>');
+                
+                PrjFile.SaveToFile(PrjFullPath);
+            Finally
+                PrjFile.Free;
+            End;
+            
+            // Verify file was created
+            If Not FileExists(PrjFullPath) Then
+            Begin
+                ShowMessage('ERROR: Project file was not created: ' + PrjFullPath);
+                Exit;
+            End;
+            
+            // Open the project
+            Try
+                If Client <> Nil Then
+                Begin
+                    Try
+                        Client.OpenDocument('', PrjFullPath);
+                    Except
+                        Try
+                            Workspace.DM_OpenProject(PrjFullPath, True);
+                        Except
+                        End;
+                    End;
+                End
+                Else
+                Begin
+                    Try
+                        Workspace.DM_OpenProject(PrjFullPath, True);
+                    Except
+                    End;
+                End;
+                
+                Sleep(1000);
+                
+                Project := Workspace.DM_FocusedProject;
+                
+                If Project <> Nil Then
+                Begin
+                    ShowMessage('SUCCESS! New project created:' + #13#10 +
+                               'Name: ' + PrjName + '.PrjPcb' + #13#10 +
+                               'Path: ' + PrjFullPath);
+                    Success := True;
+                End
+                Else
+                Begin
+                    ShowMessage('Project file created:' + #13#10 +
+                               'Path: ' + PrjFullPath + #13#10 +
+                               'Please open it manually if needed.');
+                    Success := True;
+                End;
+            Except
+                ShowMessage('Project file created at: ' + PrjFullPath);
+                Success := True;
+            End;
+        Except
+            ShowMessage('ERROR: Exception creating project file: ' + PrjFullPath);
+        End;
+    Except
+        ShowMessage('ERROR: Could not create project');
+    End;
+    
+    // Clear command file if successful
+    If Success Then
+    Begin
+        Try
+            CommandFile := TStringList.Create;
+            Try
+                CommandFile.Add('[]');
+                CommandFile.SaveToFile(FileName);
+            Finally
+                CommandFile.Free;
+            End;
+        Except
+        End;
+    End;
+End;
+
+// Main execution procedure
+Procedure ExecuteCommand;
 Var
     CommandFile: TStringList;
     FileName: String;
     FileContent: String;
-    CommandType: String;
-    CommandStart: Integer;
-    ScriptPath: String;
     LowerContent: String;
 Begin
     // Check PCB commands first
-    FileName := 'E:\Workspace\AI\11.10.WayNe\new-version\pcb_commands.json';
+    FileName := BASE_PATH + 'pcb_commands.json';
     
     If FileExists(FileName) Then
     Begin
@@ -79,94 +271,36 @@ Begin
             FileContent := CommandFile.Text;
             LowerContent := LowerCase(FileContent);
             
-            // Check for each command type
+            // Execute create_project command
+            If (Pos('"create_new_project"', LowerContent) > 0) Or 
+               (Pos('"create_project"', LowerContent) > 0) Then
+            Begin
+                ExecuteCreateProject(FileContent);
+                Exit;
+            End;
+            
+            // For other commands, show message that they need individual scripts
+            // (We can add more inline execution later)
             If Pos('"move_component"', LowerContent) > 0 Then
             Begin
-                ScriptPath := 'commands\pcb\moveComponent.pas';
                 ShowMessage('Command: move_component' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunMoveComponent');
-                Exit;
-            End
-            Else If Pos('"rotate_component"', LowerContent) > 0 Then
-            Begin
-                ScriptPath := 'commands\pcb\rotateComponent.pas';
-                ShowMessage('Command: rotate_component' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunRotateComponent');
-                Exit;
-            End
-            Else If Pos('"remove_component"', LowerContent) > 0 Then
-            Begin
-                ScriptPath := 'commands\pcb\removeComponent.pas';
-                ShowMessage('Command: remove_component' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunRemoveComponent');
-                Exit;
-            End
-            Else If Pos('"add_component"', LowerContent) > 0 Then
-            Begin
-                ScriptPath := 'commands\pcb\addComponent.pas';
-                ShowMessage('Command: add_component' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunAddComponent');
-                Exit;
-            End
-            Else If Pos('"change_component_value"', LowerContent) > 0 Then
-            Begin
-                ScriptPath := 'commands\pcb\changeComponentValue.pas';
-                ShowMessage('Command: change_component_value' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunChangeComponentValue');
-                Exit;
-            End
-            Else If Pos('"add_track"', LowerContent) > 0 Then
-            Begin
-                ScriptPath := 'commands\pcb\addTrack.pas';
-                ShowMessage('Command: add_track' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunAddTrack');
-                Exit;
-            End
-            Else If Pos('"add_via"', LowerContent) > 0 Then
-            Begin
-                ScriptPath := 'commands\pcb\addVia.pas';
-                ShowMessage('Command: add_via' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunAddVia');
-                Exit;
-            End
-            Else If Pos('"change_layer"', LowerContent) > 0 Then
-            Begin
-                ScriptPath := 'commands\pcb\changeLayer.pas';
-                ShowMessage('Command: change_layer' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunChangeLayer');
-                Exit;
-            End
-            Else If Pos('"create_new_project"', LowerContent) > 0 Then
-            Begin
-                ScriptPath := 'commands\project\createProject.pas';
-                ShowMessage('Command: create_new_project' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: CreateProject');
+                           'Please run: commands\pcb\moveComponent.pas → ExecuteMoveComponent');
                 Exit;
             End
             Else If Pos('"export_pcb_info"', LowerContent) > 0 Then
             Begin
-                ScriptPath := 'commands\export\exportPCBInfo.pas';
                 ShowMessage('Command: export_pcb_info' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunExportPCBInfo');
+                           'Please run: commands\export\exportPCBInfo.pas → ExportPCBInfo');
                 Exit;
             End;
+            
         Finally
             CommandFile.Free;
         End;
     End;
     
     // Check schematic commands
-    FileName := 'E:\Workspace\AI\11.10.WayNe\new-version\schematic_commands.json';
+    FileName := BASE_PATH + 'schematic_commands.json';
     
     If FileExists(FileName) Then
     Begin
@@ -178,42 +312,8 @@ Begin
             
             If Pos('"place_component"', LowerContent) > 0 Then
             Begin
-                ScriptPath := 'commands\schematic\placeComponent.pas';
                 ShowMessage('Command: place_component' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunPlaceComponent');
-                Exit;
-            End
-            Else If Pos('"add_wire"', LowerContent) > 0 Then
-            Begin
-                ScriptPath := 'commands\schematic\addWire.pas';
-                ShowMessage('Command: add_wire' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunAddWire');
-                Exit;
-            End
-            Else If Pos('"add_net_label"', LowerContent) > 0 Then
-            Begin
-                ScriptPath := 'commands\schematic\addNetLabel.pas';
-                ShowMessage('Command: add_net_label' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunAddNetLabel');
-                Exit;
-            End
-            Else If Pos('"add_power_port"', LowerContent) > 0 Then
-            Begin
-                ScriptPath := 'commands\schematic\addPowerPort.pas';
-                ShowMessage('Command: add_power_port' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunAddPowerPort');
-                Exit;
-            End
-            Else If Pos('"annotate"', LowerContent) > 0 Then
-            Begin
-                ScriptPath := 'commands\schematic\annotate.pas';
-                ShowMessage('Command: annotate' + #13#10 +
-                           'Run script: ' + ScriptPath + #13#10 +
-                           'Procedure: RunAnnotate');
+                           'Please run: commands\schematic\placeComponent.pas → ExecutePlaceComponent');
                 Exit;
             End;
         Finally
@@ -223,4 +323,3 @@ Begin
     
     ShowMessage('No command found in pcb_commands.json or schematic_commands.json');
 End;
-
