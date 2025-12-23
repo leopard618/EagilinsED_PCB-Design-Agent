@@ -33,29 +33,195 @@ Begin
     End;
 End;
 
+// Case-insensitive character comparison helper
+Function CharEqualIgnoreCase(Ch1, Ch2: Char): Boolean;
+Var
+    UpCh1, UpCh2: Char;
+Begin
+    If Ch1 = Ch2 Then
+    Begin
+        Result := True;
+        Exit;
+    End;
+    UpCh1 := UpCase(Ch1);
+    UpCh2 := UpCase(Ch2);
+    Result := UpCh1 = UpCh2;
+End;
+
+// Case-insensitive string search (memory efficient - no string copies)
+Function FindKeyIgnoreCase(JsonContent: String; KeyName: String; StartPos: Integer): Integer;
+Var
+    I, J, KeyLen: Integer;
+    Match: Boolean;
+Begin
+    Result := 0;
+    KeyLen := Length(KeyName);
+    If (KeyLen = 0) Or (StartPos < 1) Or (StartPos > Length(JsonContent)) Then Exit;
+    
+    // Search for "keyname" pattern (with quotes)
+    I := StartPos;
+    While I <= Length(JsonContent) - KeyLen - 1 Do
+    Begin
+        // Check for opening quote
+        If JsonContent[I] = '"' Then
+        Begin
+            Match := True;
+            // Compare key name (case-insensitive)
+            For J := 1 To KeyLen Do
+            Begin
+                If (I + J > Length(JsonContent)) Or 
+                   Not CharEqualIgnoreCase(JsonContent[I + J], KeyName[J]) Then
+                Begin
+                    Match := False;
+                    Break;
+                End;
+            End;
+            // Check for closing quote after key name
+            If Match And (I + KeyLen + 1 <= Length(JsonContent)) And 
+               (JsonContent[I + KeyLen + 1] = '"') Then
+            Begin
+                Result := I;
+                Exit;
+            End;
+        End;
+        Inc(I);
+    End;
+End;
+
 Function ExtractJsonString(JsonContent: String; KeyName: String): String;
 Var
     KeyPos, ColonPos, QuoteStart, QuoteEnd: Integer;
-    LowerJson, SearchKey: String;
+    ParamStart, ParamEnd: Integer;
+    I: Integer;
+    MaxLen: Integer;
 Begin
     Result := '';
-    LowerJson := LowerCase(JsonContent);
-    SearchKey := LowerCase(KeyName);
-    KeyPos := Pos('"' + SearchKey + '"', LowerJson);
+    MaxLen := Length(JsonContent);
+    // Safety limit: don't process files larger than 1MB
+    If MaxLen > 1048576 Then Exit;
+    
+    // First, try to find in "parameters" object (case-insensitive)
+    KeyPos := FindKeyIgnoreCase(JsonContent, 'parameters', 1);
     If KeyPos > 0 Then
     Begin
-        ColonPos := KeyPos;
-        While (ColonPos <= Length(JsonContent)) And (JsonContent[ColonPos] <> ':') Do
+        // Find colon after "parameters"
+        ColonPos := KeyPos + Length('parameters') + 1; // +1 for closing quote
+        While (ColonPos <= MaxLen) And (JsonContent[ColonPos] <> ':') Do 
+        Begin
             Inc(ColonPos);
+            If ColonPos > MaxLen Then Exit;
+        End;
+        If ColonPos > MaxLen Then Exit;
         Inc(ColonPos);
-        While (ColonPos <= Length(JsonContent)) And (JsonContent[ColonPos] = ' ') Do
+        
+        // Skip whitespace
+        While (ColonPos <= MaxLen) And (JsonContent[ColonPos] = ' ') Do 
+        Begin
             Inc(ColonPos);
-        If (ColonPos <= Length(JsonContent)) And (JsonContent[ColonPos] = '"') Then
+            If ColonPos > MaxLen Then Exit;
+        End;
+        
+        // Find the start and end of the parameters object
+        If (ColonPos <= MaxLen) And (JsonContent[ColonPos] = '{') Then
+        Begin
+            ParamStart := ColonPos;
+            ParamEnd := ParamStart + 1;
+            // Find matching '}' with safety limit
+            While (ParamEnd <= MaxLen) And (ParamEnd <= ParamStart + 10000) And 
+                  (JsonContent[ParamEnd] <> '}') Do 
+            Begin
+                Inc(ParamEnd);
+            End;
+            
+            If (ParamEnd <= MaxLen) And (JsonContent[ParamEnd] = '}') Then
+            Begin
+                // Search for KeyName within parameters section (case-insensitive)
+                KeyPos := FindKeyIgnoreCase(JsonContent, KeyName, ParamStart);
+                If (KeyPos > 0) And (KeyPos < ParamEnd) Then
+                Begin
+                    // Find colon after key
+                    ColonPos := KeyPos + Length(KeyName) + 1; // +1 for closing quote
+                    While (ColonPos <= ParamEnd) And (JsonContent[ColonPos] <> ':') Do 
+                    Begin
+                        Inc(ColonPos);
+                        If ColonPos > ParamEnd Then Exit;
+                    End;
+                    If ColonPos > ParamEnd Then Exit;
+                    Inc(ColonPos);
+                    
+                    // Skip whitespace
+                    While (ColonPos <= ParamEnd) And (JsonContent[ColonPos] = ' ') Do 
+                    Begin
+                        Inc(ColonPos);
+                        If ColonPos > ParamEnd Then Exit;
+                    End;
+                    
+                    // Skip opening quote if present
+                    If (ColonPos <= ParamEnd) And (JsonContent[ColonPos] = '"') Then 
+                        Inc(ColonPos);
+                    If ColonPos > ParamEnd Then Exit;
+                    
+                    // Extract value
+                    QuoteStart := ColonPos;
+                    QuoteEnd := QuoteStart;
+                    While (QuoteEnd <= ParamEnd) And (QuoteEnd <= QuoteStart + 1000) And
+                          (JsonContent[QuoteEnd] <> '"') And 
+                          (JsonContent[QuoteEnd] <> ',') And 
+                          (JsonContent[QuoteEnd] <> '}') Do 
+                    Begin
+                        Inc(QuoteEnd);
+                    End;
+                    
+                    If QuoteEnd > QuoteStart Then
+                    Begin
+                        Result := Copy(JsonContent, QuoteStart, QuoteEnd - QuoteStart);
+                        Exit; // Found in parameters, exit
+                    End;
+                End;
+            End;
+        End;
+    End;
+    
+    // If not found in "parameters", try to find at the root level
+    KeyPos := FindKeyIgnoreCase(JsonContent, KeyName, 1);
+    If KeyPos > 0 Then
+    Begin
+        // Find colon after key
+        ColonPos := KeyPos + Length(KeyName) + 1; // +1 for closing quote
+        While (ColonPos <= MaxLen) And (JsonContent[ColonPos] <> ':') Do
+        Begin
             Inc(ColonPos);
+            If ColonPos > MaxLen Then Exit;
+        End;
+        If ColonPos > MaxLen Then Exit;
+        Inc(ColonPos);
+        
+        // Skip whitespace
+        While (ColonPos <= MaxLen) And (JsonContent[ColonPos] = ' ') Do
+        Begin
+            Inc(ColonPos);
+            If ColonPos > MaxLen Then Exit;
+        End;
+        If ColonPos > MaxLen Then Exit;
+        
+        // Skip opening quote if present
+        If (ColonPos <= MaxLen) And (JsonContent[ColonPos] = '"') Then 
+            Inc(ColonPos);
+        If ColonPos > MaxLen Then Exit;
+        
+        // Extract value
         QuoteStart := ColonPos;
         QuoteEnd := QuoteStart;
-        While (QuoteEnd <= Length(JsonContent)) And (JsonContent[QuoteEnd] <> '"') And (JsonContent[QuoteEnd] <> #13) And (JsonContent[QuoteEnd] <> #10) Do
+        While (QuoteEnd <= MaxLen) And (QuoteEnd <= QuoteStart + 1000) And
+              (JsonContent[QuoteEnd] <> '"') And 
+              (JsonContent[QuoteEnd] <> ',') And 
+              (JsonContent[QuoteEnd] <> '}') And 
+              (JsonContent[QuoteEnd] <> #13) And 
+              (JsonContent[QuoteEnd] <> #10) Do
+        Begin
             Inc(QuoteEnd);
+        End;
+        
         If QuoteEnd > QuoteStart Then
             Result := Copy(JsonContent, QuoteStart, QuoteEnd - QuoteStart);
     End;
@@ -98,11 +264,20 @@ Begin
     End;
 End;
 
+// Get workspace interface (wrapper for built-in GetWorkSpace)
+Function GetWorkspace: IWorkspace;
+Begin
+    Try
+        Result := GetWorkSpace;
+    Except
+        Result := Nil;
+    End;
+End;
+
 // Execute CreateProject command
 Procedure ExecuteCreateProject(FileContent: String);
 Var
     Workspace: IWorkspace;
-    Client: IClient;
     Project: IProject;
     CommandFile: TStringList;
     FileName: String;
@@ -114,13 +289,17 @@ Begin
     Success := False;
     FileName := BASE_PATH + 'pcb_commands.json';
     
-    // Extract project name
+    // Extract project name (check multiple formats)
     PrjName := ExtractJsonString(FileContent, 'project_name');
     If PrjName = '' Then
     Begin
-        PrjName := ExtractJsonString(FileContent, 'name');
+        PrjName := ExtractJsonString(FileContent, 'projectName');  // camelCase
         If PrjName = '' Then
-            PrjName := 'NewProject';
+        Begin
+            PrjName := ExtractJsonString(FileContent, 'name');
+            If PrjName = '' Then
+                PrjName := 'NewProject';
+        End;
     End;
     
     // Extract project path
@@ -140,12 +319,6 @@ Begin
         Begin
             ShowMessage('ERROR: Cannot access workspace');
             Exit;
-        End;
-        
-        Try
-            Client := GetClient;
-        Except
-            Client := Nil;
         End;
         
         // Extract directory path
@@ -188,22 +361,16 @@ Begin
             
             // Open the project
             Try
-                If Client <> Nil Then
-                Begin
-                    Try
-                        Client.OpenDocument('', PrjFullPath);
-                    Except
-                        Try
-                            Workspace.DM_OpenProject(PrjFullPath, True);
-                        Except
-                        End;
-                    End;
-                End
-                Else
-                Begin
+                // Try using global Client variable first (wrapped in try-except for safety)
+                Try
+                    Client.OpenDocument('', PrjFullPath);
+                Except
+                    // Client.OpenDocument failed or Client not available, try Workspace method
                     Try
                         Workspace.DM_OpenProject(PrjFullPath, True);
                     Except
+                        // Both methods failed, but file was created successfully
+                        // User can open it manually
                     End;
                 End;
                 
@@ -258,7 +425,7 @@ Var
     CommandFile: TStringList;
     FileName: String;
     FileContent: String;
-    LowerContent: String;
+    HasCreateCommand: Boolean;
 Begin
     // Check PCB commands first
     FileName := BASE_PATH + 'pcb_commands.json';
@@ -269,11 +436,22 @@ Begin
         Try
             CommandFile.LoadFromFile(FileName);
             FileContent := CommandFile.Text;
-            LowerContent := LowerCase(FileContent);
             
-            // Execute create_project command
-            If (Pos('"create_new_project"', LowerContent) > 0) Or 
-               (Pos('"create_project"', LowerContent) > 0) Then
+            // Safety check: limit file size to prevent memory issues
+            If Length(FileContent) > 1048576 Then // 1MB limit
+            Begin
+                ShowMessage('ERROR: Command file too large (>1MB). Please check the file.');
+                Exit;
+            End;
+            
+            // Check for create project commands (case-insensitive, memory-efficient)
+            // Search once for each possible command name
+            HasCreateCommand := (FindKeyIgnoreCase(FileContent, 'create_new_project', 1) > 0) Or
+                                (FindKeyIgnoreCase(FileContent, 'create_project', 1) > 0) Or
+                                (FindKeyIgnoreCase(FileContent, 'createnewproject', 1) > 0) Or
+                                (FindKeyIgnoreCase(FileContent, 'createproject', 1) > 0);
+            
+            If HasCreateCommand Then
             Begin
                 ExecuteCreateProject(FileContent);
                 Exit;
@@ -281,13 +459,13 @@ Begin
             
             // For other commands, show message that they need individual scripts
             // (We can add more inline execution later)
-            If Pos('"move_component"', LowerContent) > 0 Then
+            If FindKeyIgnoreCase(FileContent, 'move_component', 1) > 0 Then
             Begin
                 ShowMessage('Command: move_component' + #13#10 +
                            'Please run: commands\pcb\moveComponent.pas → ExecuteMoveComponent');
                 Exit;
             End
-            Else If Pos('"export_pcb_info"', LowerContent) > 0 Then
+            Else If FindKeyIgnoreCase(FileContent, 'export_pcb_info', 1) > 0 Then
             Begin
                 ShowMessage('Command: export_pcb_info' + #13#10 +
                            'Please run: commands\export\exportPCBInfo.pas → ExportPCBInfo');
@@ -308,9 +486,15 @@ Begin
         Try
             CommandFile.LoadFromFile(FileName);
             FileContent := CommandFile.Text;
-            LowerContent := LowerCase(FileContent);
             
-            If Pos('"place_component"', LowerContent) > 0 Then
+            // Safety check: limit file size
+            If Length(FileContent) > 1048576 Then // 1MB limit
+            Begin
+                ShowMessage('ERROR: Command file too large (>1MB). Please check the file.');
+                Exit;
+            End;
+            
+            If FindKeyIgnoreCase(FileContent, 'place_component', 1) > 0 Then
             Begin
                 ShowMessage('Command: place_component' + #13#10 +
                            'Please run: commands\schematic\placeComponent.pas → ExecutePlaceComponent');

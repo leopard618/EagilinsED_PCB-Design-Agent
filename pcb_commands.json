@@ -1,9 +1,9 @@
 [
   {
-    "command": "create_project",
+    "command": "CreateNewProject",
     "parameters": {
-      "project_name": "TestProject"
+      "projectName": "TEST"
     },
-    "timestamp": 1766180246.9834168
+    "timestamp": 1766479733.6975079
   }
 ]

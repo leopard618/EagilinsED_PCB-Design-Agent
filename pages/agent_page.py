@@ -84,6 +84,101 @@ class ChatMessage(ctk.CTkFrame):
         self.msg_label.configure(text=text)
 
 
+class ConfirmationModal(ctk.CTkToplevel):
+    """Confirmation modal dialog"""
+    
+    def __init__(self, parent, message: str, on_confirm, on_cancel):
+        super().__init__(parent)
+        self.on_confirm = on_confirm
+        self.on_cancel = on_cancel
+        self.result = None
+        
+        self.title("Confirm Action")
+        self.geometry("500x200")
+        self.resizable(False, False)
+        
+        # Make modal
+        self.transient(parent)
+        self.grab_set()
+        
+        # Center on parent
+        self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() // 2) - (500 // 2)
+        y = parent.winfo_y() + (parent.winfo_height() // 2) - (200 // 2)
+        self.geometry(f"500x200+{x}+{y}")
+        
+        # Colors
+        colors = {
+            "bg": "#1e293b",
+            "text": "#f8fafc",
+            "primary": "#3b82f6",
+            "primary_hover": "#2563eb",
+            "secondary": "#64748b"
+        }
+        
+        self.configure(fg_color=colors["bg"])
+        
+        # Message label
+        msg_label = ctk.CTkLabel(
+            self,
+            text=message,
+            font=ctk.CTkFont(size=14),
+            text_color=colors["text"],
+            wraplength=450,
+            justify="left"
+        )
+        msg_label.pack(pady=30, padx=20)
+        
+        # Buttons frame
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(pady=20)
+        
+        # Yes button
+        yes_btn = ctk.CTkButton(
+            btn_frame,
+            text="Yes",
+            width=100,
+            height=35,
+            fg_color=colors["primary"],
+            hover_color=colors["primary_hover"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._on_yes
+        )
+        yes_btn.pack(side="left", padx=10)
+        
+        # No button
+        no_btn = ctk.CTkButton(
+            btn_frame,
+            text="No",
+            width=100,
+            height=35,
+            fg_color=colors["secondary"],
+            hover_color="#475569",
+            font=ctk.CTkFont(size=13),
+            command=self._on_no
+        )
+        no_btn.pack(side="left", padx=10)
+        
+        # Focus on Yes button
+        yes_btn.focus_set()
+        
+        # Bind Enter and Escape keys
+        self.bind("<Return>", lambda e: self._on_yes())
+        self.bind("<Escape>", lambda e: self._on_no())
+    
+    def _on_yes(self):
+        self.result = True
+        if self.on_confirm:
+            self.on_confirm()
+        self.destroy()
+    
+    def _on_no(self):
+        self.result = False
+        if self.on_cancel:
+            self.on_cancel()
+        self.destroy()
+
+
 class AgentPage(ctk.CTkFrame):
     """Professional agent chat interface"""
     
@@ -95,6 +190,7 @@ class AgentPage(ctk.CTkFrame):
         self.messages = []
         self.is_loading = False
         self.is_destroyed = False  # Track if widget is destroyed
+        self.pending_confirmation = None  # Store confirmation data
         
         # Color scheme (matching welcome page)
         self.colors = {
@@ -363,8 +459,17 @@ I help with project creation, design analysis, layout generation, and command ex
         # Always re-enable input first
         self.set_loading(False)
         
-        # Update status
-        if status == "error":
+        # Check if this is a confirmation request
+        if status == "confirm":
+            # Store confirmation data
+            self.pending_confirmation = {
+                "message": response,
+                "command": getattr(self.agent, 'pending_command', None)
+            }
+            # Show confirmation modal
+            self._show_confirmation_modal(response)
+            self.set_status("Waiting for confirmation", "info")
+        elif status == "error":
             self.set_status("Error", "error")
         elif is_exec:
             self.set_status("Command Ready", "info")
@@ -372,6 +477,61 @@ I help with project creation, design analysis, layout generation, and command ex
             self.set_status("Analysis Complete", "success")
         else:
             self.set_status("Ready", "success")
+        
+        # Final scroll
+        self.chat_frame.update()
+        self.chat_frame._parent_canvas.yview_moveto(1.0)
+    
+    def _show_confirmation_modal(self, message: str):
+        """Show confirmation modal dialog"""
+        def on_confirm():
+            """User confirmed - execute the command"""
+            if self.agent and self.agent.pending_command:
+                # Execute the pending command
+                self.set_loading(True)
+                self.set_status("Executing command...", "info")
+                
+                # Execute in background thread
+                def execute():
+                    try:
+                        result = self.agent.execute_pending_command()
+                        response_text = result.get("message", "Command executed")
+                        status = result.get("status", "success")
+                        is_exec = (status == "success")
+                        
+                        self._safe_after(0, lambda: self.on_command_executed(response_text, status, is_exec))
+                    except Exception as e:
+                        self._safe_after(0, lambda: self.on_command_executed(f"Error: {e}", "error", False))
+                
+                threading.Thread(target=execute, daemon=True).start()
+            else:
+                self.set_status("No command to execute", "error")
+                self.set_loading(False)
+        
+        def on_cancel():
+            """User cancelled - just continue chatting"""
+            self.set_status("Ready", "success")
+            self.set_loading(False)
+        
+        # Show modal
+        modal = ConfirmationModal(self, message, on_confirm, on_cancel)
+    
+    def on_command_executed(self, response: str, status: str, is_exec: bool):
+        """Handle command execution result"""
+        # Add execution result message
+        self.add_message(response, is_user=False)
+        
+        # Update status
+        self.set_loading(False)
+        if status == "error":
+            self.set_status("Error", "error")
+        elif is_exec:
+            self.set_status("Command Executed", "success")
+        else:
+            self.set_status("Ready", "success")
+        
+        # Clear pending confirmation
+        self.pending_confirmation = None
         
         # Final scroll
         self.chat_frame.update()

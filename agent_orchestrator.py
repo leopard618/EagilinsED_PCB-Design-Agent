@@ -43,6 +43,7 @@ class AgentOrchestrator:
         self.conversation_history = []
         self.current_analysis = None  # Cache for design analysis
         self.current_layout = None  # Cache for generated layout
+        self.pending_command = None  # Store command waiting for confirmation
     
     def process_query(self, user_query: str, stream_callback: Optional[Callable[[str], None]] = None) -> Tuple[str, str, bool]:
         """
@@ -95,13 +96,18 @@ class AgentOrchestrator:
             return response_text, status, is_execution
         
         elif action == "execute":
-            # Execute command via MCP (commands are queued for manual execution)
+            # Prepare command for confirmation (don't execute yet)
             pcb_info = all_context.get("pcb_info")
-            execution_result = self._execute_command(intent_response, pcb_info)
-            response_text = execution_result.get("message", "Command queued")
-            status = execution_result.get("status", "success")
-            # Treat "info" status as answered (not execution) since it's explaining limitations
-            is_execution = (status == "success")
+            execution_result = self._prepare_command_confirmation(intent_response, pcb_info)
+            response_text = execution_result.get("message", "Command ready for confirmation")
+            status = execution_result.get("status", "confirm")
+            is_execution = False  # Not executed yet, waiting for confirmation
+            
+            # Store pending command for later execution
+            self.pending_command = {
+                "intent": intent_response,
+                "pcb_info": pcb_info
+            }
             
             # Add assistant response to history
             self.conversation_history.append({
@@ -459,6 +465,97 @@ Default to design intelligence (analyze/strategy/review/generate_layout) over si
                 "action": "answer",
                 "response": None
             }
+    
+    def _prepare_command_confirmation(self, intent: Dict[str, Any], pcb_info: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Prepare command confirmation message - returns confirmation request instead of executing"""
+        logger.info(f"Preparing command confirmation with intent: {intent}")
+        
+        if not self.mcp_client.connected:
+            logger.warning("Not connected to Altium Designer")
+            return {
+                "status": "error",
+                "message": "Not connected to Altium Designer. Please connect first."
+            }
+        
+        command = intent.get("command")
+        parameters = intent.get("parameters", {})
+        
+        if not command:
+            # Generate command from query using LLM
+            command_data = self.llm_client.generate_modification_command(
+                intent.get("reasoning", ""),
+                pcb_info
+            )
+            if command_data:
+                command = command_data.get("command")
+                parameters = command_data.get("parameters", {})
+        
+        if command:
+            # Generate confirmation message
+            confirmation_msg = self._generate_confirmation_message(command, parameters, intent.get("reasoning", ""))
+            
+            return {
+                "status": "confirm",
+                "message": confirmation_msg,
+                "command": command,
+                "parameters": parameters
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Could not determine the command to execute."
+            }
+    
+    def _generate_confirmation_message(self, command: str, parameters: Dict[str, Any], user_query: str = "") -> str:
+        """Generate a natural confirmation message for the command"""
+        # Map commands to friendly names
+        command_names = {
+            "create_project": "create a new project",
+            "create_new_project": "create a new project",
+            "move_component": "move a component",
+            "rotate_component": "rotate a component",
+            "add_component": "add a component",
+            "remove_component": "remove a component",
+            "export_pcb_info": "export PCB information",
+            "place_component": "place a component",
+            "add_wire": "add a wire",
+            "add_net_label": "add a net label"
+        }
+        
+        friendly_action = command_names.get(command, command.replace("_", " "))
+        
+        # Build parameter description
+        param_desc = []
+        if "project_name" in parameters:
+            param_desc.append(f'named "{parameters["project_name"]}"')
+        if "name" in parameters:
+            param_desc.append(f'named "{parameters["name"]}"')
+        if "component_name" in parameters:
+            param_desc.append(f'component "{parameters["component_name"]}"')
+        if "x" in parameters and "y" in parameters:
+            param_desc.append(f'to position ({parameters["x"]}, {parameters["y"]})')
+        
+        param_text = " " + " ".join(param_desc) if param_desc else ""
+        
+        # Generate natural confirmation message
+        return f"Are you going to {friendly_action}{param_text}?"
+    
+    def execute_pending_command(self) -> Dict[str, Any]:
+        """Execute the pending command after user confirmation"""
+        if not self.pending_command:
+            return {
+                "status": "error",
+                "message": "No pending command to execute."
+            }
+        
+        intent = self.pending_command.get("intent")
+        pcb_info = self.pending_command.get("pcb_info")
+        
+        # Clear pending command
+        self.pending_command = None
+        
+        # Execute the command
+        return self._execute_command(intent, pcb_info)
     
     def _execute_command(self, intent: Dict[str, Any], pcb_info: Dict[str, Any] = None) -> Dict[str, Any]:
         """Execute command via MCP - routes to PCB or Schematic based on command type"""
