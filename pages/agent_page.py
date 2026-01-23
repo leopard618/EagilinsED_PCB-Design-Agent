@@ -340,6 +340,20 @@ class AgentPage(ctk.CTkFrame):
         self.input_entry.grid(row=0, column=0, padx=(15, 5), pady=5, sticky="ew")
         self.input_entry.bind("<Return>", lambda e: self.send_message())
         
+        # Upload button
+        self.upload_button = ctk.CTkButton(
+            input_wrapper,
+            text="📁",
+            font=ctk.CTkFont(size=16),
+            width=40,
+            height=40,
+            corner_radius=8,
+            fg_color=self.colors["bg_hover"],
+            hover_color=self.colors["border"],
+            command=self.upload_file
+        )
+        self.upload_button.grid(row=0, column=1, padx=(0, 5), pady=5)
+        
         # Send button
         self.send_button = ctk.CTkButton(
             input_wrapper,
@@ -352,7 +366,7 @@ class AgentPage(ctk.CTkFrame):
             hover_color=self.colors["primary_hover"],
             command=self.send_message
         )
-        self.send_button.grid(row=0, column=1, padx=(0, 5), pady=5)
+        self.send_button.grid(row=0, column=2, padx=(0, 5), pady=5)
     
     def add_welcome_message(self):
         """Add professional welcome message"""
@@ -446,8 +460,9 @@ I help with project creation, design analysis, layout generation, and command ex
             # Update UI
             self._safe_after(0, lambda: self.on_response_complete(response, status, is_exec, streaming_msg))
             
-        except Exception as e:
-            self._safe_after(0, lambda: self.on_response_complete(f"Error: {e}", "error", False, None))
+        except Exception as ex:
+            error_msg = str(ex)
+            self._safe_after(0, lambda: self.on_response_complete(f"Error: {error_msg}", "error", False, None))
     
     def on_response_complete(self, response: str, status: str, is_exec: bool, msg: ChatMessage):
         """Handle response completion"""
@@ -561,6 +576,104 @@ I help with project creation, design analysis, layout generation, and command ex
             # Widget is destroyed or invalid, ignore
             self.is_destroyed = True
             pass
+    
+    def upload_file(self):
+        """Open file dialog to upload PCB/Schematic files"""
+        from tkinter import filedialog
+        
+        filetypes = [
+            ("All PCB Files", "*.PcbDoc;*.SchDoc;*.PrjPcb"),
+            ("PCB Documents", "*.PcbDoc"),
+            ("Schematic Documents", "*.SchDoc"),
+            ("PCB Projects", "*.PrjPcb"),
+            ("All Files", "*.*")
+        ]
+        
+        filepath = filedialog.askopenfilename(
+            title="Select PCB/Schematic File",
+            filetypes=filetypes,
+            initialdir="."
+        )
+        
+        if filepath:
+            # Determine file type
+            if filepath.lower().endswith('.pcbdoc'):
+                self.load_pcb_file(filepath)
+            elif filepath.lower().endswith('.schdoc'):
+                self.add_message(f"Selected schematic: {filepath}", is_user=True)
+                self.add_message("Schematic analysis coming soon!", is_user=False)
+            elif filepath.lower().endswith('.prjpcb'):
+                self.add_message(f"Selected project: {filepath}", is_user=True)
+                self.add_message("Project analysis coming soon!", is_user=False)
+            else:
+                self.add_message(f"Unknown file type: {filepath}", is_user=False)
+    
+    def load_pcb_file(self, filepath: str):
+        """Load and analyze a PCB file via MCP server"""
+        import os
+        
+        # Show loading message
+        self.add_message(f"Loading: {os.path.basename(filepath)}", is_user=True)
+        self.set_status("Loading PCB...", "warning")
+        self.set_loading(True)
+        
+        # Process in background
+        def load():
+            try:
+                # Load PCB via MCP client (updates the server!)
+                result = self.mcp_client.load_pcb_file(filepath)
+                
+                if result.get("error"):
+                    raise Exception(result.get("error"))
+                
+                # Get statistics from server response
+                stats = result.get("statistics", {})
+                artifact_id = result.get("artifact_id", "unknown")
+                layers = result.get("layers", 0)
+                
+                # Build response
+                response = f"""PCB Loaded Successfully!
+
+File: {os.path.basename(filepath)}
+Artifact ID: {artifact_id[:8]}...
+
+Board Info:
+  • Layers: {layers}
+  • Tracks: {stats.get('track_count', 0)}
+  • Vias: {stats.get('via_count', 0)}
+  • Components: {stats.get('component_count', 0)}
+  • Nets: {stats.get('net_count', 0)}
+
+You can now ask me to:
+  • Generate routing suggestions
+  • Run DRC check
+  • Analyze the design
+  • Optimize component placement"""
+                
+                self._safe_after(0, lambda: self.on_pcb_loaded(response, artifact_id))
+                
+            except Exception as e:
+                import traceback
+                error_msg = f"Error loading PCB: {str(e)}"
+                print(traceback.format_exc())
+                self._safe_after(0, lambda: self.on_pcb_load_error(error_msg))
+        
+        threading.Thread(target=load, daemon=True).start()
+    
+    def on_pcb_loaded(self, response: str, artifact_id: str):
+        """Handle successful PCB load"""
+        self.add_message(response, is_user=False)
+        self.set_loading(False)
+        self.set_status("PCB Loaded", "success")
+        
+        # Store artifact ID for future commands
+        self.current_artifact_id = artifact_id
+    
+    def on_pcb_load_error(self, error: str):
+        """Handle PCB load error"""
+        self.add_message(error, is_user=False)
+        self.set_loading(False)
+        self.set_status("Error", "error")
     
     def go_back(self):
         """Go back to project setup page"""

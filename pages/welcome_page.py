@@ -216,7 +216,7 @@ class WelcomePage(ctk.CTkFrame):
         
         footer_text = ctk.CTkLabel(
             footer,
-            text="Ensure Altium Designer is running before connecting",
+            text="Python File Reader - NO Altium Scripts Needed!",
             font=ctk.CTkFont(size=11),
             text_color=self.colors["text_dim"]
         )

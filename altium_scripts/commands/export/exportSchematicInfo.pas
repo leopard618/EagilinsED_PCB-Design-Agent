@@ -7,12 +7,8 @@
 
 Const
     BASE_PATH = 'D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent\';
-    MAX_COMPONENTS = 200;    // EXTREME limit for 23GB memory situation
-    MAX_WIRES = 500;         // EXTREME limit for 23GB memory situation
-    MAX_NETLABELS = 100;     // EXTREME limit for 23GB memory situation
-    MAX_POWERPORTS = 50;     // EXTREME limit for 23GB memory situation
-    MAX_PORTS = 50;          // EXTREME limit for 23GB memory situation
-    BATCH_SIZE = 10;         // Very frequent refresh for memory cleanup
+    WRITE_INTERVAL = 1;      // ULTRA-AGGRESSIVE: Write to file EVERY SINGLE ITEM (for 23GB Altium)
+    BATCH_SIZE = 1;          // ULTRA-AGGRESSIVE: UI refresh after EVERY item (maximum memory cleanup)
 
 // Optimized helper function to escape JSON strings
 // Uses pre-check to avoid unnecessary concatenations
@@ -85,6 +81,49 @@ Begin
     // Altium internal units: 1 mil = 10000 internal units
     // 1 mm = 39.3701 mils
     Result := Coord / 10000 / 39.3701;
+End;
+
+// Append buffer to file and clear it (ULTRA-AGGRESSIVE for 23GB Altium)
+// Uses direct file append - NO file loading into memory
+Procedure AppendBufferToFile(Var Buffer: TStringList; FileName: String);
+Var
+    OutputFile: TextFile;
+    I: Integer;
+    TempStr: String;
+Begin
+    If Buffer.Count = 0 Then Exit;
+    
+    Try
+        // ULTRA-AGGRESSIVE: Direct file append - no memory loading
+        AssignFile(OutputFile, FileName);
+        Try
+            If FileExists(FileName) Then
+                Append(OutputFile)  // Append mode - doesn't load file
+            Else
+                Rewrite(OutputFile);  // Create new file
+            
+            // Write each line immediately
+            For I := 0 To Buffer.Count - 1 Do
+            Begin
+                TempStr := Buffer[I];
+                WriteLn(OutputFile, TempStr);
+                TempStr := '';  // Clear immediately
+            End;
+            
+            CloseFile(OutputFile);
+        Except
+            Try
+                CloseFile(OutputFile);
+            Except
+            End;
+        End;
+        
+        // ULTRA-AGGRESSIVE: Clear buffer immediately
+        Buffer.Clear;
+    Except
+        // If write fails, clear buffer anyway
+        Buffer.Clear;
+    End;
 End;
 
 // Export schematic information
@@ -216,17 +255,30 @@ Begin
                     Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
                     
                     Component := Iterator.FirstSchObject;
-                    While (Component <> Nil) And (CompCount < MAX_COMPONENTS) Do
+                    While Component <> Nil Do  // NO LIMIT - process all!
                     Begin
                         Inc(CompCount);
                         Inc(BatchCounter);
                         
-                        // UI refresh every BATCH_SIZE items
+                        // ULTRA-AGGRESSIVE: Write to file after EVERY item
+                        If CompCount Mod WRITE_INTERVAL = 0 Then
+                        Begin
+                            Try
+                                AppendBufferToFile(OutputFile, FileName);
+                            Except
+                                OutputFile.Clear;
+                            End;
+                        End;
+                        
+                        // ULTRA-AGGRESSIVE: UI refresh after EVERY item
                         If BatchCounter >= BATCH_SIZE Then
                         Begin
                             BatchCounter := 0;
-                            Application.ProcessMessages;
-                            Sleep(5);  // Longer sleep for memory cleanup
+                            Try
+                                Application.ProcessMessages;
+                                Sleep(5);
+                            Except
+                            End;
                         End;
                         
                         If Not FirstItem Then
@@ -235,7 +287,8 @@ Begin
                         
                         OutputFile.Add('    {');
                         
-                        // Designator
+                        // MINIMAL PROPERTY ACCESS - Only essential properties
+                        // Designator (essential)
                         Try
                             DesignatorStr := Component.Designator.Text;
                             If DesignatorStr = '' Then DesignatorStr := 'Unknown';
@@ -243,51 +296,12 @@ Begin
                             DesignatorStr := 'Unknown';
                         End;
                         OutputFile.Add('      "designator": "' + EscapeJsonString(DesignatorStr) + '",');
+                        DesignatorStr := '';  // Clear immediately
                         
-                        // Comment (usually the value)
-                        Try
-                            ValueStr := Component.Comment.Text;
-                        Except
-                            ValueStr := '';
-                        End;
-                        OutputFile.Add('      "value": "' + EscapeJsonString(ValueStr) + '",');
-                        
-                        // Library reference
-                        Try
-                            LibRefStr := Component.LibReference;
-                        Except
-                            LibRefStr := '';
-                        End;
-                        OutputFile.Add('      "library_ref": "' + EscapeJsonString(LibRefStr) + '",');
-                        
-                        // Source library
-                        Try
-                            TempStr := Component.SourceLibraryName;
-                        Except
-                            TempStr := '';
-                        End;
-                        OutputFile.Add('      "source_library": "' + EscapeJsonString(TempStr) + '",');
-                        
-                        // Footprint
-                        Try
-                            FootprintStr := Component.Footprint;
-                            If FootprintStr = '' Then
-                            Begin
-                                For I := 0 To Component.ParameterCount - 1 Do
-                                Begin
-                                    If I > 10 Then Break;  // Safety limit
-                                    Parameter := Component.SchParameters(I);
-                                    If (Parameter <> Nil) And (LowerCase(Parameter.Name) = 'footprint') Then
-                                    Begin
-                                        FootprintStr := Parameter.Text;
-                                        Break;
-                                    End;
-                                End;
-                            End;
-                        Except
-                            FootprintStr := '';
-                        End;
-                        OutputFile.Add('      "footprint": "' + EscapeJsonString(FootprintStr) + '",');
+                        // SKIP: Comment.Text (may trigger memory)
+                        // SKIP: LibReference (may trigger memory)
+                        // SKIP: SourceLibraryName (may trigger memory)
+                        // SKIP: Footprint (may trigger memory, requires ParameterCount access)
                         
                         // Location - cache coordinates and format once
                         Try
@@ -669,14 +683,23 @@ Begin
         OutputFile.Add('  "status": "active"');
         OutputFile.Add('}');
         
-        // Save to file
+        // Write final buffer
         FileName := BASE_PATH + 'schematic_info.json';
         Try
-            OutputFile.SaveToFile(FileName);
+            AppendBufferToFile(OutputFile, FileName);
+            
+            // Finalize JSON - read file, add closing bracket
+            Try
+                OutputFile.LoadFromFile(FileName);
+                // Remove any existing closing bracket
+                While (OutputFile.Count > 0) And (Trim(OutputFile[OutputFile.Count - 1]) = '}') Do
+                    OutputFile.Delete(OutputFile.Count - 1);
+                OutputFile.Add('}');
+                OutputFile.SaveToFile(FileName);
+            Except
+            End;
         Except
             ShowMessage('ERROR: Could not save file to:' + #13#10 + FileName);
-            OutputFile.Free;
-            Exit;
         End;
         
         // Show success message

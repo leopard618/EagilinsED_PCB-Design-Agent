@@ -2,6 +2,9 @@
 Altium Importer
 Maps Altium JSON exports to canonical G-IR and C-IR artifacts
 Per Architecture Spec §8.1
+
+Now supports DIRECT file reading (no Altium scripting needed!)
+Uses tools/altium_file_reader.py to read .PcbDoc files directly.
 """
 import json
 from pathlib import Path
@@ -14,13 +17,111 @@ from core.ir.gir import (
 from core.ir.cir import ConstraintIR, Rule, RuleType, RuleScope, RuleParams, Netclass, NetclassDefaults
 from core.artifacts.models import Artifact, ArtifactType, ArtifactMeta, SourceEngine, CreatedBy
 
+# Try to import the direct file reader
+try:
+    from tools.altium_file_reader import AltiumFileReader
+    DIRECT_READER_AVAILABLE = True
+except ImportError:
+    DIRECT_READER_AVAILABLE = False
+
 
 class AltiumImporter:
     """Imports Altium data to canonical IR artifacts"""
     
     def __init__(self):
         """Initialize importer"""
-        pass
+        self.file_reader = AltiumFileReader() if DIRECT_READER_AVAILABLE else None
+    
+    def import_pcb_direct(self, pcb_file_path: str) -> Optional[GeometryIR]:
+        """
+        Import PCB directly from .PcbDoc file (NO Altium scripting needed!)
+        
+        This reads the Altium file directly using Python, avoiding memory issues.
+        
+        Args:
+            pcb_file_path: Path to .PcbDoc file
+            
+        Returns:
+            GeometryIR object or None if import fails
+        """
+        if not self.file_reader:
+            print("ERROR: Direct file reader not available. Install olefile: pip install olefile")
+            return None
+        
+        try:
+            # Read PCB file directly
+            pcb_data = self.file_reader.read_pcb(pcb_file_path)
+            
+            if 'error' in pcb_data:
+                print(f"Error reading PCB file: {pcb_data['error']}")
+                return None
+            
+            # Convert to same format as JSON import
+            return self._convert_direct_data_to_gir(pcb_data)
+        except Exception as e:
+            print(f"Error importing PCB directly: {e}")
+            return None
+    
+    def _convert_direct_data_to_gir(self, pcb_data: Dict[str, Any]) -> GeometryIR:
+        """Convert direct file reader data to G-IR"""
+        # Extract board information
+        board_size = pcb_data.get('board_size', {})
+        width_mm = board_size.get('width_mm', 100.0)
+        height_mm = board_size.get('height_mm', 80.0)
+        
+        # Create board outline
+        outline = BoardOutline(
+            polygon=[[0, 0], [width_mm, 0], [width_mm, height_mm], [0, height_mm]]
+        )
+        
+        # Create default layers
+        layers = [
+            Layer(id="L1", name="Top", kind=LayerKind.SIGNAL, index=1),
+            Layer(id="L2", name="GND", kind=LayerKind.GROUND, index=2),
+            Layer(id="L3", name="VCC", kind=LayerKind.POWER, index=3),
+            Layer(id="L4", name="Bottom", kind=LayerKind.SIGNAL, index=4),
+        ]
+        
+        # Create stackup
+        stackup = Stackup(
+            layers=[layer.id for layer in layers],
+            thickness_mm=1.6,
+            dielectrics=[]
+        )
+        
+        board = Board(outline=outline, layers=layers, stackup=stackup)
+        
+        # Extract components
+        footprints = []
+        for comp in pcb_data.get('components', []):
+            if isinstance(comp, dict):
+                footprints.append(Footprint(
+                    id=f"fp-{comp.get('designitemid', 'unknown')}",
+                    ref=comp.get('designitemid', 'U?'),
+                    position=[comp.get('x_mm', 0), comp.get('y_mm', 0)],
+                    rotation_deg=0,
+                    layer="L1",
+                    pads=[],
+                    footprint_name=comp.get('pattern', '')
+                ))
+        
+        # Extract nets
+        nets = []
+        for net in pcb_data.get('nets', []):
+            if isinstance(net, dict):
+                net_name = net.get('name', 'Unknown')
+                nets.append(Net(id=f"net-{net_name.lower()}", name=net_name))
+        
+        # Statistics for empty arrays
+        stats = pcb_data.get('statistics', {})
+        
+        return GeometryIR(
+            board=board,
+            nets=nets,
+            tracks=[],  # Detailed tracks not extracted yet
+            vias=[],    # Detailed vias not extracted yet
+            footprints=footprints
+        )
     
     def import_pcb_info(self, pcb_info_path: str) -> Optional[GeometryIR]:
         """

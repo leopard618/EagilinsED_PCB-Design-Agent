@@ -7,8 +7,8 @@
 
 Const
     BASE_PATH = 'D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent\';
-    MAX_RULES = 100;  // EXTREME limit for 23GB memory situation
-    BATCH_SIZE = 5;   // Very frequent refresh for memory cleanup
+    WRITE_INTERVAL = 1;      // ULTRA-AGGRESSIVE: Write to file EVERY SINGLE ITEM (for 23GB Altium)
+    BATCH_SIZE = 1;          // ULTRA-AGGRESSIVE: UI refresh after EVERY item (maximum memory cleanup)
 
 // Helper function to escape JSON strings
 Function EscapeJsonString(InputStr: String): String;
@@ -137,11 +137,31 @@ Begin
                         Iterator.AddFilter_Method(eProcessAll);
                         
                         Rule := Iterator.FirstPCBObject;
-                        While (Rule <> Nil) And (SafetyCounter < MAX_RULES) Do
+                        While Rule <> Nil Do  // NO LIMIT - process all!
                         Begin
-                            Inc(SafetyCounter);
-                            Inc(BatchCounter);
                             Inc(RuleCount);
+                            Inc(BatchCounter);
+                            
+                            // ULTRA-AGGRESSIVE: Write to file after EVERY item
+                            If RuleCount Mod WRITE_INTERVAL = 0 Then
+                            Begin
+                                Try
+                                    AppendBufferToFile(OutputFile, FileName);
+                                Except
+                                    OutputFile.Clear;
+                                End;
+                            End;
+                            
+                            // ULTRA-AGGRESSIVE: UI refresh after EVERY item
+                            If BatchCounter >= BATCH_SIZE Then
+                            Begin
+                                BatchCounter := 0;
+                                Try
+                                    Application.ProcessMessages;
+                                    Sleep(5);
+                                Except
+                                End;
+                            End;
                             
                             // Get basic properties with minimal access
                             Try
@@ -291,11 +311,7 @@ Begin
                         // Close arrays
                         OutputFile.Add('  ],');
                         
-                        // Safety check
-                        If SafetyCounter >= MAX_RULES Then
-                        Begin
-                            OutputFile.Add('  "warning": "Reached safety limit of ' + IntToStr(MAX_RULES) + ' rules",');
-                        End;
+                        // NO LIMITS - process all rules
                     Finally
                         PCB.BoardIterator_Destroy(Iterator);
                     End;
@@ -323,9 +339,20 @@ Begin
             OutputFile.Add('  "status": "success"');
             OutputFile.Add('}');
             
-            // Write to file
+            // Write final buffer
             FileName := BASE_PATH + 'design_rules.json';
-            OutputFile.SaveToFile(FileName);
+            AppendBufferToFile(OutputFile, FileName);
+            
+            // Finalize JSON - read file, add closing bracket
+            Try
+                OutputFile.LoadFromFile(FileName);
+                // Remove any existing closing bracket
+                While (OutputFile.Count > 0) And (Trim(OutputFile[OutputFile.Count - 1]) = '}') Do
+                    OutputFile.Delete(OutputFile.Count - 1);
+                OutputFile.Add('}');
+                OutputFile.SaveToFile(FileName);
+            Except
+            End;
         Finally
             OutputFile.Free;
         End;

@@ -11,7 +11,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
 
 # MCP Configuration
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8080")
+# Default port 8765 for new Python-based MCP server
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8765")
 MCP_TIMEOUT = int(os.getenv("MCP_TIMEOUT", "30"))
 
 # UI Configuration

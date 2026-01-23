@@ -7,8 +7,8 @@
 
 Const
     BASE_PATH = 'D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent\';
-    MAX_DOCUMENTS = 1000;  // Safety limit
-    BATCH_SIZE = 50;       // Process in batches
+    WRITE_INTERVAL = 1;      // ULTRA-AGGRESSIVE: Write to file EVERY SINGLE ITEM (for 23GB Altium)
+    BATCH_SIZE = 1;          // ULTRA-AGGRESSIVE: UI refresh after EVERY item (maximum memory cleanup)
 
 // Helper function to escape JSON strings
 Function EscapeJsonString(InputStr: String): String;
@@ -39,6 +39,49 @@ Begin
             ResultStr := ResultStr + Ch;
     End;
     Result := ResultStr;
+End;
+
+// Append buffer to file and clear it (ULTRA-AGGRESSIVE for 23GB Altium)
+// Uses direct file append - NO file loading into memory
+Procedure AppendBufferToFile(Var Buffer: TStringList; FileName: String);
+Var
+    OutputFile: TextFile;
+    I: Integer;
+    TempStr: String;
+Begin
+    If Buffer.Count = 0 Then Exit;
+    
+    Try
+        // ULTRA-AGGRESSIVE: Direct file append - no memory loading
+        AssignFile(OutputFile, FileName);
+        Try
+            If FileExists(FileName) Then
+                Append(OutputFile)  // Append mode - doesn't load file
+            Else
+                Rewrite(OutputFile);  // Create new file
+            
+            // Write each line immediately
+            For I := 0 To Buffer.Count - 1 Do
+            Begin
+                TempStr := Buffer[I];
+                WriteLn(OutputFile, TempStr);
+                TempStr := '';  // Clear immediately
+            End;
+            
+            CloseFile(OutputFile);
+        Except
+            Try
+                CloseFile(OutputFile);
+            Except
+            End;
+        End;
+        
+        // ULTRA-AGGRESSIVE: Clear buffer immediately
+        Buffer.Clear;
+    Except
+        // If write fails, clear buffer anyway
+        Buffer.Clear;
+    End;
 End;
 
 // Export project information to JSON
@@ -135,12 +178,7 @@ Begin
         // Get document count
         Try
             DocCount := Project.DM_LogicalDocumentCount;
-            If DocCount > MAX_DOCUMENTS Then
-            Begin
-                ShowMessage('WARNING: Project has ' + IntToStr(DocCount) + ' documents.' + #13#10 +
-                            'Only first ' + IntToStr(MAX_DOCUMENTS) + ' will be exported.');
-                DocCount := MAX_DOCUMENTS;
-            End;
+            // NO LIMIT - process all documents
         Except
             DocCount := 0;
         End;
@@ -161,6 +199,26 @@ Begin
             Try
                 For I := 0 To DocCount - 1 Do
                 Begin
+                    // ULTRA-AGGRESSIVE: Write to file after EVERY item
+                    If I Mod WRITE_INTERVAL = 0 Then
+                    Begin
+                        Try
+                            AppendBufferToFile(OutputFile, FileName);
+                        Except
+                            OutputFile.Clear;
+                        End;
+                    End;
+                    
+                    // ULTRA-AGGRESSIVE: UI refresh after EVERY item
+                    If I Mod BATCH_SIZE = 0 Then
+                    Begin
+                        Try
+                            Application.ProcessMessages;
+                            Sleep(5);
+                        Except
+                        End;
+                    End;
+                    
                     Inc(SafetyCounter);
                     
                     Try
@@ -257,7 +315,19 @@ Begin
             
             // Write to file
             FileName := BASE_PATH + 'project_info.json';
-            OutputFile.SaveToFile(FileName);
+            // Write final buffer
+            AppendBufferToFile(OutputFile, FileName);
+            
+            // Finalize JSON - read file, add closing bracket
+            Try
+                OutputFile.LoadFromFile(FileName);
+                // Remove any existing closing bracket
+                While (OutputFile.Count > 0) And (Trim(OutputFile[OutputFile.Count - 1]) = '}') Do
+                    OutputFile.Delete(OutputFile.Count - 1);
+                OutputFile.Add('}');
+                OutputFile.SaveToFile(FileName);
+            Except
+            End;
         Finally
             OutputFile.Free;
         End;

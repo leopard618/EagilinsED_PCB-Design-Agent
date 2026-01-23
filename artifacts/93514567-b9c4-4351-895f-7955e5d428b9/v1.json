@@ -1,0 +1,77 @@
+{
+  "id": "93514567-b9c4-4351-895f-7955e5d428b9",
+  "type": "pcb.board",
+  "version": 1,
+  "relations": [],
+  "data": {
+    "board": {
+      "outline": {
+        "polygon": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "layers": [
+        {
+          "id": "L1",
+          "name": "Top",
+          "kind": "signal",
+          "index": 1
+        },
+        {
+          "id": "L2",
+          "name": "GND",
+          "kind": "ground",
+          "index": 2
+        },
+        {
+          "id": "L3",
+          "name": "VCC",
+          "kind": "power",
+          "index": 3
+        },
+        {
+          "id": "L4",
+          "name": "Bottom",
+          "kind": "signal",
+          "index": 4
+        }
+      ],
+      "stackup": {
+        "layers": [
+          "L1",
+          "L2",
+          "L3",
+          "L4"
+        ],
+        "thickness_mm": 1.6,
+        "dielectrics": []
+      }
+    },
+    "nets": [],
+    "tracks": [],
+    "vias": [],
+    "footprints": []
+  },
+  "meta": {
+    "source_engine": "altium",
+    "created_at": "2026-01-23T15:26:26.966510",
+    "updated_at": "2026-01-23T15:26:26.966515",
+    "created_by": "engine",
+    "tags": []
+  }
+}

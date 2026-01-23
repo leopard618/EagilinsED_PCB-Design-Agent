@@ -295,6 +295,17 @@ class AltiumMCPClient:
             return None
         
         try:
+            # Try new Python-based server endpoint first
+            response = self.session.get(
+                f"{self.server_url}/pcb/info",
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if not data.get("error"):
+                    return data
+            
+            # Fallback to old endpoint
             response = self.session.get(
                 f"{self.server_url}/altium/pcb/info",
                 timeout=MCP_TIMEOUT
@@ -550,4 +561,131 @@ class AltiumMCPClient:
         elif self.active_document_type == self.DOC_PROJECT:
             return self.get_project_info()
         return None
+    
+    # ==========================================
+    # New Python-based MCP Server Methods
+    # ==========================================
+    
+    def load_pcb_file(self, pcb_path: str) -> Optional[Dict[str, Any]]:
+        """
+        Load a PCB file directly using Python file reader
+        NO Altium scripts needed!
+        
+        Args:
+            pcb_path: Path to .PcbDoc file
+            
+        Returns:
+            dict with loading result
+        """
+        try:
+            response = self.session.post(
+                f"{self.server_url}/pcb/load",
+                json={"path": pcb_path},
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("success"):
+                    self.connected = True
+                return result
+            return {"error": f"Server error: {response.status_code}"}
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def get_routing_suggestions(self) -> Optional[Dict[str, Any]]:
+        """Get routing suggestions for the loaded PCB"""
+        try:
+            response = self.session.get(
+                f"{self.server_url}/routing/suggestions",
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error getting routing suggestions: {e}")
+            return None
+    
+    def route_net(self, net_id: str, start: list, end: list, 
+                  layer: str = "L1", width: float = 0.25) -> Optional[Dict[str, Any]]:
+        """
+        Route a net on the PCB
+        
+        Args:
+            net_id: Net identifier
+            start: Start position [x, y]
+            end: End position [x, y]
+            layer: Layer ID (default L1)
+            width: Track width in mm
+            
+        Returns:
+            dict with routing result
+        """
+        try:
+            response = self.session.post(
+                f"{self.server_url}/routing/route",
+                json={
+                    "net_id": net_id,
+                    "start": start,
+                    "end": end,
+                    "layer": layer,
+                    "width": width
+                },
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return {"error": f"Server error: {response.status_code}"}
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def place_via(self, net_id: str, position: list, 
+                  layers: list = None, drill: float = 0.3) -> Optional[Dict[str, Any]]:
+        """
+        Place a via on the PCB
+        
+        Args:
+            net_id: Net identifier
+            position: Position [x, y]
+            layers: Layer IDs (default ["L1", "L4"])
+            drill: Drill size in mm
+            
+        Returns:
+            dict with via placement result
+        """
+        try:
+            response = self.session.post(
+                f"{self.server_url}/routing/via",
+                json={
+                    "net_id": net_id,
+                    "position": position,
+                    "layers": layers or ["L1", "L4"],
+                    "drill": drill
+                },
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return {"error": f"Server error: {response.status_code}"}
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def run_drc(self) -> Optional[Dict[str, Any]]:
+        """
+        Run DRC check on the loaded PCB
+        
+        Returns:
+            dict with DRC violations
+        """
+        try:
+            response = self.session.get(
+                f"{self.server_url}/drc/run",
+                timeout=MCP_TIMEOUT
+            )
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error running DRC: {e}")
+            return None
 

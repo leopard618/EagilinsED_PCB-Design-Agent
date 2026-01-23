@@ -62,9 +62,31 @@ class AgentOrchestrator:
         # Get ALL available context (not just PCB)
         all_context = self._get_all_available_context()
         
-        # Use LLM to determine intent and generate response
-        intent_response = self._determine_intent(user_query, all_context)
-        action = intent_response.get("action", "answer")
+        # Quick pattern matching for common commands (faster than LLM)
+        query_lower = user_query.lower()
+        
+        # DRC patterns
+        if any(word in query_lower for word in ["drc", "violation", "design rule check"]):
+            action = "drc"
+            intent_response = {"action": "drc"}
+        # Routing patterns
+        elif "routing suggestion" in query_lower or "routing strategy" in query_lower or "generate routing" in query_lower:
+            action = "routing"
+            intent_response = {"action": "routing", "routing_action": "suggestions"}
+        elif "route net" in query_lower or ("route" in query_lower and "from" in query_lower):
+            action = "routing"
+            intent_response = {"action": "routing", "routing_action": "route"}
+        elif "place" in query_lower and "via" in query_lower:
+            action = "routing"
+            intent_response = {"action": "routing", "routing_action": "via"}
+        # Artifact patterns
+        elif any(word in query_lower for word in ["artifact", "uuid", "where is my data"]):
+            action = "artifact"
+            intent_response = {"action": "artifact"}
+        else:
+            # Use LLM to determine intent for other queries
+            intent_response = self._determine_intent(user_query, all_context)
+            action = intent_response.get("action", "answer")
         
         # Handle design intelligence actions
         if action == "analyze":
@@ -84,6 +106,27 @@ class AgentOrchestrator:
         elif action == "review":
             response_text = self._perform_design_review(user_query, all_context)
             status = "reviewed"
+            is_execution = False
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
+        elif action == "routing":
+            response_text = self._handle_routing(user_query, intent_response)
+            status = "routing"
+            is_execution = True
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
+        elif action == "drc":
+            response_text = self._handle_drc(user_query)
+            status = "drc"
+            is_execution = True
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
+        elif action == "artifact":
+            response_text = self._handle_artifact_query(user_query)
+            status = "artifact"
             is_execution = False
             self.conversation_history.append({"role": "assistant", "content": response_text})
             return response_text, status, is_execution
@@ -138,28 +181,63 @@ class AgentOrchestrator:
         if not pcb_info:
             return "No PCB info available"
         
+        # Check for error response
+        if pcb_info.get("error"):
+            return f"PCB Error: {pcb_info.get('error')}"
+        
         try:
             stats = pcb_info.get("statistics", {})
-            summary = f"PCB: {pcb_info.get('file_name', 'Unknown')}\n"
-            summary += f"Board: {pcb_info.get('board_size', {}).get('width_mm', 0):.1f}mm x {pcb_info.get('board_size', {}).get('height_mm', 0):.1f}mm\n"
-            summary += f"Components: {stats.get('component_count', 0)}, Nets: {stats.get('net_count', 0)}, Layers: {stats.get('layer_count', 0)}\n"
-            summary += f"Vias: {stats.get('via_count', 0)}, Tracks: {stats.get('track_count', 0)}\n"
+            summary = f"PCB File: {pcb_info.get('file_name', pcb_info.get('file', 'Unknown'))}\n"
             
-            # Only include component/net names if query needs them
+            # Board size
+            board_size = pcb_info.get('board_size', {})
+            width = board_size.get('width_mm', 0)
+            height = board_size.get('height_mm', 0)
+            summary += f"Board Size: {width:.1f}mm x {height:.1f}mm\n"
+            
+            # Statistics
+            summary += f"Components: {stats.get('component_count', 0)}\n"
+            summary += f"Nets: {stats.get('net_count', 0)}\n"
+            summary += f"Tracks: {stats.get('track_count', 0)}\n"
+            summary += f"Vias: {stats.get('via_count', 0)}\n"
+            summary += f"Layers: {stats.get('layer_count', pcb_info.get('layer_count', 0))}\n"
+            
+            # Layer names
+            layers = pcb_info.get("layers", [])
+            if layers and len(layers) > 0:
+                layer_names = [l.get("name", "Unknown") if isinstance(l, dict) else str(l) for l in layers]
+                summary += f"Layer names: {', '.join(layer_names)}\n"
+            
+            # Components with details
             components = pcb_info.get("components", [])
             if components and len(components) > 0:
-                # Limit to first 10 component names
-                comp_names = [c.get("name", "Unknown") if isinstance(c, dict) else str(c) for c in components[:10]]
-                summary += f"Sample components: {', '.join(comp_names)}\n"
+                summary += f"\nComponents ({len(components)} total):\n"
+                for comp in components[:15]:  # Show more components
+                    if isinstance(comp, dict):
+                        name = comp.get("name", comp.get("designator", "?"))
+                        footprint = comp.get("footprint", "")
+                        layer = comp.get("layer", "")
+                        loc = comp.get("location", {})
+                        x = loc.get("x_mm", 0)
+                        y = loc.get("y_mm", 0)
+                        summary += f"  - {name}: {footprint} at ({x:.1f}, {y:.1f})mm on {layer}\n"
+                    else:
+                        summary += f"  - {comp}\n"
+                if len(components) > 15:
+                    summary += f"  ... and {len(components) - 15} more\n"
             
+            # Nets
             nets = pcb_info.get("nets", [])
             if nets and len(nets) > 0:
-                net_names = [n.get("name", "Unknown") if isinstance(n, dict) else str(n) for n in nets[:10]]
-                summary += f"Sample nets: {', '.join(net_names)}"
+                net_names = [n.get("name", "Unknown") if isinstance(n, dict) else str(n) for n in nets[:20]]
+                summary += f"\nNets ({len(nets)} total): {', '.join(net_names)}"
+                if len(nets) > 20:
+                    summary += f", ... and {len(nets) - 20} more"
+                summary += "\n"
             
             return summary
-        except:
-            return "PCB info available but could not summarize"
+        except Exception as e:
+            return f"PCB info available but could not summarize: {str(e)}"
     
     def _summarize_schematic_info(self, sch_info: Dict[str, Any] = None) -> str:
         """Create a concise summary of schematic info"""
@@ -358,51 +436,58 @@ class AgentOrchestrator:
         if all_context is None:
             all_context = {}
         
-        system_prompt = """You are an intelligent PCB design co-pilot for Altium Designer. You help professional engineers with design intelligence, not basic operations.
+        system_prompt = """You are an intelligent PCB design co-pilot. All PCB data is loaded via Python file reader (NO Altium scripts needed).
 
 The user may be requesting:
-1. DESIGN ANALYSIS - Analyze schematic, identify functional blocks, understand design intent
-2. PLACEMENT STRATEGY - Generate component placement recommendations
-3. DESIGN REVIEW - Review design for issues, missing components, violations
-4. ANSWER - Answer questions about the current design
-5. EXECUTE - Execute a specific modification command (rare - professionals know Altium)
+1. DESIGN ANALYSIS - Analyze PCB, identify functional blocks
+2. PLACEMENT STRATEGY - Generate component placement recommendations  
+3. DESIGN REVIEW - Review design for issues, DRC violations
+4. ANSWER - Answer questions about components, nets, layers, routing, DRC
+5. EXECUTE - Route nets, place vias, run DRC
 
-You have access to:
-- Schematic data (components, nets, connections, topology)
-- PCB data (layers, components, traces, board size)
-- Design rules (clearance, width, via rules)
-- Verification reports (DRC/ERC violations)
+You have access to (loaded via Python file reader):
+- PCB data (components with name/footprint/location/layer, nets, tracks, vias, layers)
+- Routing module (route nets, place vias, generate suggestions)
+- DRC module (run checks, get violations)
 
 Respond with JSON:
 {
-    "action": "analyze" or "strategy" or "review" or "generate_layout" or "answer" or "execute",
+    "action": "analyze" or "strategy" or "review" or "routing" or "drc" or "answer",
     "reasoning": "brief explanation",
     "analysis_type": "functional_blocks|signal_paths|constraints|full" (if action is analyze),
-    "command": "command_name" (if action is execute),
-    "parameters": {} (if action is execute),
+    "routing_action": "suggestions" or "route" or "via" (if action is routing),
+    "parameters": {} (for routing/drc actions),
     "response": null
 }
 
-PRIORITIZE DESIGN INTELLIGENCE:
-- "Analyze this schematic" → analyze (functional_blocks)
-- "What are the functional blocks?" → analyze (functional_blocks)
-- "Generate placement strategy" → strategy
-- "How should I place these components?" → strategy
-- "Review this design" → review
-- "Are there any issues?" → review
-- "What's missing in this design?" → review
-- "Suggest placement for power supply" → strategy
-- "Identify high-speed signals" → analyze (signal_paths)
-- "Generate layout" → generate_layout (AUTONOMOUS LAYOUT)
-- "Create initial placement" → generate_layout
-- "Place all components automatically" → generate_layout
-- "Auto-place the board" → generate_layout
+ROUTING COMMANDS (action="routing"):
+- "generate routing suggestions" → routing, routing_action="suggestions"
+- "route net +21V" → routing, routing_action="route"
+- "place a via" → routing, routing_action="via"
+- "what is the best routing strategy?" → routing, routing_action="suggestions"
 
-Only use "execute" for explicit single-component commands like:
-- "Move R1 to 50, 30" → execute
-- "Rotate U1 by 90 degrees" → execute
+DRC COMMANDS (action="drc"):
+- "run DRC check" → drc
+- "check for violations" → drc
+- "are there any design rule violations?" → drc
 
-Default to design intelligence (analyze/strategy/review/generate_layout) over simple answers."""
+ARTIFACT COMMANDS (action="artifact"):
+- "show current artifact" → artifact
+- "what is the artifact id" → artifact
+- "where is my data stored" → artifact
+
+ANSWER (use PCB data directly):
+- "how many components?" → answer (use statistics from PCB data)
+- "list nets" → answer (use nets from PCB data)
+- "where is component C135?" → answer (search components)
+- "what layers?" → answer (use layers from PCB data)
+
+DESIGN INTELLIGENCE:
+- "analyze this PCB" → analyze
+- "review this design" → review
+- "generate placement strategy" → strategy
+
+Default to answering questions using the loaded PCB data."""
         
         # Build context summary from all available data
         context_summary = self._get_all_context()
@@ -438,6 +523,24 @@ Default to design intelligence (analyze/strategy/review/generate_layout) over si
     def _fallback_intent_detection(self, query: str) -> Dict[str, Any]:
         """Fallback intent detection using keywords"""
         query_lower = query.lower()
+        
+        # Check for artifact queries
+        if any(word in query_lower for word in ["artifact", "uuid", "storage", "where is my data", "current artifact"]):
+            return {"action": "artifact"}
+        
+        # Check for routing queries
+        if "route" in query_lower and ("net" in query_lower or "from" in query_lower):
+            return {"action": "routing", "routing_action": "route"}
+        
+        if "via" in query_lower and ("place" in query_lower or "at" in query_lower):
+            return {"action": "routing", "routing_action": "via"}
+        
+        if "routing suggestion" in query_lower or "routing strategy" in query_lower:
+            return {"action": "routing", "routing_action": "suggestions"}
+        
+        # Check for DRC queries
+        if any(word in query_lower for word in ["drc", "violation", "design rule", "clearance check"]):
+            return {"action": "drc"}
         
         # Check for project creation
         if "create project" in query_lower or "new project" in query_lower or "create new project" in query_lower:
@@ -640,16 +743,11 @@ Default to design intelligence (analyze/strategy/review/generate_layout) over si
                         # Modification not supported - provide helpful message
                         return {
                             "status": "info",
-                            "message": "I understand you want to modify the PCB, but the current file-based connection method doesn't support modifications.\n\n" +
-                                      "To enable modifications, you would need:\n" +
-                                      "1. A real MCP server with COM interface to Altium Designer\n" +
-                                      "2. Or an Altium script that can process modification commands\n\n" +
-                                      "For now, I can help you:\n" +
-                                      "• Analyze your PCB design\n" +
-                                      "• Get component locations and details\n" +
-                                      "• Query net information\n" +
-                                      "• Provide design recommendations\n\n" +
-                                      "Would you like me to help analyze your PCB instead?"
+                            "message": "I can help you with:\n\n" +
+                                      "• **Routing**: Generate suggestions, route nets, place vias\n" +
+                                      "• **DRC**: Run design rule checks\n" +
+                                      "• **Analysis**: Component locations, net info, layer details\n\n" +
+                                      "Try: 'run DRC check' or 'generate routing suggestions'"
                         }
             else:
                 return {
@@ -777,14 +875,28 @@ Default to design intelligence (analyze/strategy/review/generate_layout) over si
         if not pcb_info:
             return "No PCB information available."
         
+        # Check for error
+        if pcb_info.get("error"):
+            return f"PCB Error: {pcb_info.get('error')}"
+        
         query_lower = query.lower()
         context = ""
         
         # Always include basic stats
         stats = pcb_info.get("statistics", {})
-        context += f"PCB: {pcb_info.get('file_name', 'Unknown')}\n"
-        context += f"Board size: {pcb_info.get('board_size', {}).get('width_mm', 0):.1f}mm x {pcb_info.get('board_size', {}).get('height_mm', 0):.1f}mm\n"
-        context += f"Statistics: {stats.get('component_count', 0)} components, {stats.get('net_count', 0)} nets, {stats.get('layer_count', 0)} layers\n"
+        file_name = pcb_info.get('file_name', pcb_info.get('file', 'Unknown'))
+        board_size = pcb_info.get('board_size', {})
+        
+        context += f"PCB: {file_name}\n"
+        context += f"Board size: {board_size.get('width_mm', 0):.1f}mm x {board_size.get('height_mm', 0):.1f}mm\n"
+        context += f"Statistics: {stats.get('component_count', 0)} components, {stats.get('net_count', 0)} nets\n"
+        context += f"Tracks: {stats.get('track_count', 0)}, Vias: {stats.get('via_count', 0)}\n"
+        
+        # Layer info - always include
+        layers = pcb_info.get("layers", [])
+        if layers:
+            layer_names = [l.get("name", str(l)) if isinstance(l, dict) else str(l) for l in layers]
+            context += f"Layers ({len(layers)}): {', '.join(layer_names)}\n"
         
         # Only include detailed data if query asks for it
         if "component" in query_lower or "where" in query_lower or "location" in query_lower or "size" in query_lower or "value" in query_lower:
@@ -876,26 +988,19 @@ Default to design intelligence (analyze/strategy/review/generate_layout) over si
         
         query_lower = query.lower()
         
-        # Special handling for component search queries
-        if any(word in query_lower for word in ["find", "search", "look for", "component", "library", "part"]) and \
-           not any(word in query_lower for word in ["result", "found", "show", "list", "what"]):
-            search_results = all_context.get("component_search")
-            if not search_results:
-                # Guide user to run search script
-                return (
-                    "To search components: File → Run Script → altium_component_search.pas → SearchComponents\n"
-                    "Results saved to component_search.json. I'll show them after you run the search."
-                )
-        
-        system_prompt = """You are an expert PCB/Schematic design assistant. Be concise and direct.
+        system_prompt = """You are an expert PCB design assistant using Python file reader (NO Altium scripts needed).
 
-CRITICAL: Keep responses SHORT (2-3 sentences max). Get straight to the point.
+CRITICAL RULES:
+1. Answer DIRECTLY from the PCB data provided - components, nets, layers, tracks, vias
+2. NEVER mention Altium scripts, File → Run Script, or .pas files
+3. All PCB data is loaded via Python file reader - no scripts required
+4. Be concise (2-3 sentences max)
+5. For routing: use /routing/suggestions, /routing/route, /routing/via endpoints
+6. For DRC: use /drc/run endpoint
 
-Available data: PCB, Schematic, Project, Design Rules, Board Config, Verification, Component Search, Outputs.
+The PCB data includes: components (name, footprint, location, layer, rotation), nets, tracks, vias, layers.
 
-Answer directly using context data. If data is missing, briefly guide them to export it.
-
-Be natural but brief. No long explanations unless specifically asked."""
+Answer questions directly using this data. If no PCB is loaded, tell user to upload a .PcbDoc file."""
         
         messages = [
             {"role": "system", "content": system_prompt}
@@ -922,28 +1027,19 @@ Be natural but brief. No long explanations unless specifically asked."""
         
         query_lower = query.lower()
         
-        # Special handling for component search queries (non-streaming for guidance)
-        if any(word in query_lower for word in ["find", "search", "look for", "component", "library", "part"]) and \
-           not any(word in query_lower for word in ["result", "found", "show", "list", "what"]):
-            search_results = all_context.get("component_search")
-            if not search_results:
-                guidance = (
-                    "To search components: File → Run Script → altium_component_search.pas → SearchComponents\n"
-                    "Results saved to component_search.json. I'll show them after you run the search."
-                )
-                if stream_callback:
-                    stream_callback(guidance)
-                return guidance
-        
-        system_prompt = """You are an expert PCB/Schematic design assistant. Be concise and direct.
+        system_prompt = """You are an expert PCB design assistant using Python file reader (NO Altium scripts needed).
 
-CRITICAL: Keep responses SHORT (2-3 sentences max). Get straight to the point.
+CRITICAL RULES:
+1. Answer DIRECTLY from the PCB data provided - components, nets, layers, tracks, vias
+2. NEVER mention Altium scripts, File → Run Script, or .pas files
+3. All PCB data is loaded via Python file reader - no scripts required
+4. Be concise (2-3 sentences max)
+5. For routing: use /routing/suggestions, /routing/route, /routing/via endpoints
+6. For DRC: use /drc/run endpoint
 
-Available data: PCB, Schematic, Project, Design Rules, Board Config, Verification, Component Search, Outputs.
+The PCB data includes: components (name, footprint, location, layer, rotation), nets, tracks, vias, layers.
 
-Answer directly using context data. If data is missing, briefly guide them to export it.
-
-Be natural but brief. No long explanations unless specifically asked."""
+Answer questions directly using this data. If no PCB is loaded, tell user to upload a .PcbDoc file."""
         
         messages = [
             {"role": "system", "content": system_prompt}
@@ -972,54 +1068,30 @@ Be natural but brief. No long explanations unless specifically asked."""
     def _generate_command_response(self, user_query: str, command: str, parameters: Dict[str, Any], 
                                    script_name: str, procedure_name: str, command_type: str) -> str:
         """
-        Generate natural, varied response for command execution using LLM
-        Makes responses more conversational and realistic
+        Generate natural response for command execution
         """
-        system_prompt = f"""You are a helpful PCB/Schematic design assistant. The user has requested a {command_type} modification command.
+        system_prompt = f"""You are a helpful PCB design assistant. The user requested: {command}
 
-The command "{command}" has been successfully prepared with parameters: {json.dumps(parameters, indent=2)}
+Parameters: {json.dumps(parameters, indent=2)}
 
-To apply this change, the user needs to:
-1. Go to Altium Designer
-2. Click File → Run Script
-3. Select '{script_name}'
-4. Choose '{procedure_name}'
-5. Click OK
+Generate a brief, natural response that:
+- Confirms what was done
+- Be concise (1-2 sentences)
+- Sound conversational
 
-Generate a natural, conversational response that:
-- Acknowledges what the user wants to do
-- Confirms the command is ready
-- Provides clear, friendly instructions on how to execute it
-- Varies your wording each time (don't use the same template)
-- Be concise but helpful
-- Use a friendly, professional tone
-
-IMPORTANT: 
-- Don't repeat the exact same message every time
-- Make it sound natural and conversational
-- Show enthusiasm when appropriate
-- Keep it under 3-4 sentences unless more detail is needed"""
+NEVER mention Altium scripts, File → Run Script, or .pas files."""
 
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"User request: {user_query}"}
         ]
         
-        # Add recent conversation context for more natural responses
-        if len(self.conversation_history) > 0:
-            messages.append({
-                "role": "system",
-                "content": f"Recent conversation context: {json.dumps(self.conversation_history[-2:], indent=2)}"
-            })
-        
-        # Use slightly higher temperature for more variety
         response = self.llm_client.chat(messages, temperature=0.8)
         
         if response:
             return response.strip()
         else:
-            # Fallback to a simple message if LLM fails
-            return f"✅ I've prepared the {command} command for you. To apply it, go to Altium Designer → File → Run Script → {script_name} → {procedure_name}."
+            return f"✅ {command} completed with {json.dumps(parameters)}"
     
     def clear_history(self):
         """Clear conversation history"""
@@ -1050,12 +1122,9 @@ IMPORTANT:
         # Check for errors
         if isinstance(analysis, dict) and "error" in analysis:
             return (
-                "I need schematic or PCB data to analyze your design. Please export your design data first:\n\n"
-                "1. Open your project in Altium Designer\n"
-                "2. Go to File → Run Script\n"
-                "3. Run 'altium_export_schematic_info.pas' → ExportSchematicInfo\n"
-                "   or 'altium_export_pcb_info.pas' → ExportPCBInfo\n\n"
-                "Once exported, I can analyze your design."
+                "I need PCB data to analyze your design.\n\n"
+                "Please upload your .PcbDoc file using the 📁 button.\n"
+                "The Python file reader will extract all component, net, and layer data automatically."
             )
         
         self.current_analysis = analysis  # Cache for follow-up questions
@@ -1100,7 +1169,7 @@ Be specific and technical - this is for a professional PCB engineer."""
         strategy = self.design_analyzer.generate_placement_strategy()
         
         if "error" in strategy:
-            return "I need schematic or PCB data to generate a placement strategy. Please export your design data first using the Altium scripts."
+            return "I need PCB data to generate a placement strategy. Please upload your .PcbDoc file using the 📁 button."
         
         # Format response
         prompt = f"""Based on this placement strategy analysis, provide clear recommendations.
@@ -1183,12 +1252,9 @@ Be constructive and specific - help the engineer improve the design."""
         
         if not schematic_info and not pcb_info:
             return (
-                "I need design data to generate a layout. Please export your schematic or PCB data first:\n\n"
-                "1. Open your project in Altium Designer\n"
-                "2. Go to File → Run Script\n"
-                "3. Run 'altium_export_schematic_info.pas' → ExportSchematicInfo\n"
-                "   or 'altium_export_pcb_info.pas' → ExportPCBInfo\n\n"
-                "Once exported, I can analyze your design and generate an optimal layout."
+                "I need PCB data to generate a layout.\n\n"
+                "Please upload your .PcbDoc file using the 📁 button.\n"
+                "The Python file reader will extract all data automatically - no scripts needed!"
             )
         
         # Get board size from PCB info or use defaults
@@ -1269,4 +1335,214 @@ Would you like me to explain the placement strategy or make any adjustments?
 """
         
         return response
+    
+    def _handle_routing(self, query: str, intent: Dict[str, Any]) -> str:
+        """Handle routing commands via MCP server"""
+        import requests
+        import re
+        
+        routing_action = intent.get("routing_action", "suggestions")
+        parameters = intent.get("parameters", {})
+        
+        try:
+            if routing_action == "suggestions":
+                # Get routing suggestions
+                response = requests.get("http://localhost:8765/routing/suggestions", timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    suggestions = data.get("suggestions", [])
+                    if suggestions:
+                        result = "## Routing Suggestions\n\n"
+                        for i, s in enumerate(suggestions, 1):
+                            result += f"{i}. **{s.get('net', 'Unknown')}**: {s.get('recommendation', '')}\n"
+                            result += f"   Priority: {s.get('priority', 'normal')}\n\n"
+                        return result
+                    else:
+                        return "No routing suggestions available. Make sure a PCB is loaded."
+                else:
+                    return f"Failed to get routing suggestions: {response.text}"
+            
+            elif routing_action == "route":
+                # Parse route command from natural language
+                # Pattern: "route net <name> from <x1>,<y1> to <x2>,<y2>"
+                query_lower = query.lower()
+                
+                # Extract net name
+                net_match = re.search(r'net\s+([+\-\w]+)', query, re.IGNORECASE)
+                net_name = net_match.group(1) if net_match else parameters.get("net_name", "unknown")
+                
+                # Extract coordinates - try multiple patterns
+                # Pattern 1: "from 10,20 to 50,60"
+                coords_match = re.search(r'from\s+(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s+to\s+(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)', query)
+                if coords_match:
+                    start_x = float(coords_match.group(1))
+                    start_y = float(coords_match.group(2))
+                    end_x = float(coords_match.group(3))
+                    end_y = float(coords_match.group(4))
+                else:
+                    # Pattern 2: "from (10,20) to (50,60)"
+                    coords_match = re.search(r'from\s*\(?\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)?\s*to\s*\(?\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)?', query)
+                    if coords_match:
+                        start_x = float(coords_match.group(1))
+                        start_y = float(coords_match.group(2))
+                        end_x = float(coords_match.group(3))
+                        end_y = float(coords_match.group(4))
+                    else:
+                        start_x = parameters.get("start_x", 0)
+                        start_y = parameters.get("start_y", 0)
+                        end_x = parameters.get("end_x", 10)
+                        end_y = parameters.get("end_y", 10)
+                
+                # Route a net
+                route_data = {
+                    "net_id": f"net-{net_name.lower()}",
+                    "start": [start_x, start_y],
+                    "end": [end_x, end_y],
+                    "layer": parameters.get("layer", "L1"),
+                    "width": parameters.get("width_mm", 0.25)
+                }
+                response = requests.post("http://localhost:8765/routing/route", json=route_data, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    return f"✅ Route created for net **{net_name}** from ({start_x}, {start_y}) to ({end_x}, {end_y}) on Top layer."
+                else:
+                    return f"Failed to create route: {response.text}"
+            
+            elif routing_action == "via":
+                # Parse via placement from natural language
+                # Pattern: "place a via at 30,40 for net GND"
+                query_lower = query.lower()
+                
+                # Extract position
+                pos_match = re.search(r'at\s+(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)', query)
+                if pos_match:
+                    x = float(pos_match.group(1))
+                    y = float(pos_match.group(2))
+                else:
+                    x = parameters.get("x", 0)
+                    y = parameters.get("y", 0)
+                
+                # Extract net name
+                net_match = re.search(r'(?:for\s+)?net\s+([+\-\w]+)', query, re.IGNORECASE)
+                net_name = net_match.group(1) if net_match else parameters.get("net_name", "unknown")
+                
+                via_data = {
+                    "net_id": f"net-{net_name.lower()}",
+                    "position": [x, y],
+                    "layers": ["L1", "L4"],
+                    "drill": 0.3
+                }
+                response = requests.post("http://localhost:8765/routing/via", json=via_data, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    return f"✅ Via placed at ({x}, {y}) for net **{net_name}**."
+                else:
+                    return f"Failed to place via: {response.text}"
+            
+            else:
+                return f"Unknown routing action: {routing_action}"
+                
+        except requests.exceptions.RequestException as e:
+            return f"Error connecting to MCP server: {str(e)}\n\nMake sure the MCP server is running (python mcp_server.py)"
+    
+    def _handle_drc(self, query: str) -> str:
+        """Handle DRC commands via MCP server"""
+        import requests
+        
+        query_lower = query.lower()
+        
+        try:
+            response = requests.get("http://localhost:8765/drc/run", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                violations = data.get("violations", [])
+                summary = data.get("summary", {})
+                stats = data.get("stats", {})
+                
+                # Filter violations based on query
+                filtered_violations = violations
+                filter_type = None
+                
+                if "clearance" in query_lower:
+                    filter_type = "clearance"
+                    filtered_violations = [v for v in violations if "clearance" in v.get("type", "").lower()]
+                elif "width" in query_lower or "trace" in query_lower:
+                    filter_type = "width"
+                    filtered_violations = [v for v in violations if "width" in v.get("type", "").lower()]
+                elif "power" in query_lower:
+                    filter_type = "power"
+                    filtered_violations = [v for v in violations if "power" in v.get("type", "").lower() or "power" in v.get("message", "").lower()]
+                elif "unrouted" in query_lower:
+                    filter_type = "unrouted"
+                    filtered_violations = [v for v in violations if "unrouted" in v.get("type", "").lower()]
+                
+                # Build response based on context
+                if filter_type:
+                    result = f"## {filter_type.title()} Violations\n\n"
+                    if filtered_violations:
+                        result += f"Found **{len(filtered_violations)}** {filter_type} violations:\n\n"
+                        for i, v in enumerate(filtered_violations[:10], 1):
+                            result += f"{i}. **{v.get('type', 'Unknown')}** ({v.get('severity', 'warning')})\n"
+                            result += f"   {v.get('message', 'No details')}\n\n"
+                    else:
+                        result += f"✅ No {filter_type} violations found!\n"
+                else:
+                    # General DRC summary
+                    result = "## DRC Check Results\n\n"
+                    result += f"**Total Violations:** {summary.get('total', len(violations))}\n"
+                    result += f"**Errors:** {summary.get('errors', 0)}\n"
+                    result += f"**Warnings:** {summary.get('warnings', 0)}\n\n"
+                    
+                    if stats:
+                        result += f"**Board Stats:** {stats.get('components', 0)} components, {stats.get('nets', 0)} nets\n\n"
+                    
+                    if violations:
+                        result += "### Violations:\n"
+                        for i, v in enumerate(violations[:10], 1):
+                            result += f"{i}. **{v.get('type', 'Unknown')}** ({v.get('severity', 'warning')})\n"
+                            result += f"   {v.get('message', 'No details')}\n\n"
+                        
+                        if len(violations) > 10:
+                            result += f"... and {len(violations) - 10} more violations\n"
+                    else:
+                        result += "✅ **No violations found!** Your design passes all DRC checks.\n"
+                
+                return result
+            else:
+                return f"Failed to run DRC: {response.text}"
+                
+        except requests.exceptions.RequestException as e:
+            return f"Error connecting to MCP server: {str(e)}\n\nMake sure the MCP server is running (python mcp_server.py)"
+    
+    def _handle_artifact_query(self, query: str) -> str:
+        """Handle artifact info queries via MCP server"""
+        import requests
+        
+        try:
+            response = requests.get("http://localhost:8765/artifact", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                
+                if data.get("error"):
+                    return f"No artifact loaded. Please upload a PCB file first using the 📁 button."
+                
+                result = "## Current Artifact\n\n"
+                result += f"**Artifact ID:** `{data.get('artifact_id', 'Unknown')}`\n"
+                result += f"**PCB File:** {data.get('file', 'Unknown')}\n"
+                result += f"**Storage Folder:** `{data.get('folder', 'Unknown')}`\n\n"
+                
+                files = data.get('files', [])
+                if files:
+                    result += "**Files:**\n"
+                    for f in files:
+                        result += f"- `{f}`\n"
+                
+                result += "\n📁 You can open the folder to see version history (v1.json, v2.json, etc.)"
+                
+                return result
+            else:
+                return f"Failed to get artifact info: {response.text}"
+                
+        except requests.exceptions.RequestException as e:
+            return f"Error connecting to MCP server: {str(e)}"
 

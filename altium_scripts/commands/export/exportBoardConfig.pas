@@ -7,7 +7,8 @@
 
 Const
     BASE_PATH = 'D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent\';
-    MAX_LAYERS = 100;  // Safety limit
+    WRITE_INTERVAL = 1;      // ULTRA-AGGRESSIVE: Write to file EVERY SINGLE ITEM (for 23GB Altium)
+    BATCH_SIZE = 1;          // ULTRA-AGGRESSIVE: UI refresh after EVERY item (maximum memory cleanup)
 
 // Helper function to escape JSON strings
 Function EscapeJsonString(InputStr: String): String;
@@ -173,7 +174,7 @@ Begin
             Begin
                 For I := 1 To LayerStack.LayersCount Do
                 Begin
-                    If I > MAX_LAYERS Then Break;  // Safety limit
+                    // NO LIMIT - process all layers
                     
                     Layer := LayerStack.LayerObject(I);
                     If Layer <> Nil Then
@@ -255,7 +256,19 @@ Begin
         // Save to file
         FileName := BASE_PATH + 'board_config.json';
         Try
-            OutputFile.SaveToFile(FileName);
+            // Write final buffer
+            AppendBufferToFile(OutputFile, FileName);
+            
+            // Finalize JSON - read file, add closing bracket
+            Try
+                OutputFile.LoadFromFile(FileName);
+                // Remove any existing closing bracket
+                While (OutputFile.Count > 0) And (Trim(OutputFile[OutputFile.Count - 1]) = '}') Do
+                    OutputFile.Delete(OutputFile.Count - 1);
+                OutputFile.Add('}');
+                OutputFile.SaveToFile(FileName);
+            Except
+            End;
             ShowMessage('Board Configuration Exported!' + #13#10 + #13#10 +
                         'Board Size: ' + FormatFloat('0.00', Width) + ' x ' + FormatFloat('0.00', Height) + ' mm' + #13#10 +
                         'Layers: ' + IntToStr(LayerCount) + ' total, ' + IntToStr(SignalLayers) + ' signal' + #13#10 + #13#10 +
