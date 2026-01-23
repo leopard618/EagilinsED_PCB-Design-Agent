@@ -2,10 +2,13 @@
  * Run DRC Command
  * Runs Design Rule Check and exports results
  * Command: run_drc
+ * OPTIMIZED: Direct TStringList writing, removed JSONStr concatenation, limits
  *}
 
 Const
-    BASE_PATH = 'E:\Workspace\AI\11.10.WayNe\new-version\';
+    BASE_PATH = 'D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent\';
+    MAX_VIOLATIONS = 1000;  // Safety limit
+    BATCH_SIZE = 50;        // Process in batches
 
 // Helper function to escape JSON strings
 Function EscapeJsonString(InputStr: String): String;
@@ -15,6 +18,8 @@ Var
     Ch: Char;
 Begin
     ResultStr := '';
+    If Length(InputStr) > 500 Then
+        InputStr := Copy(InputStr, 1, 500);  // Limit string length
     For I := 1 To Length(InputStr) Do
     Begin
         Ch := InputStr[I];
@@ -44,13 +49,13 @@ Var
     Doc           : IDocument;
     OutputFile    : TStringList;
     FileName      : String;
-    JSONStr       : String;
     Violation     : IPCB_Violation;
     Iterator      : IPCB_BoardIterator;
     ViolationCount: Integer;
     ErrorCount    : Integer;
     WarningCount  : Integer;
     FirstItem     : Boolean;
+    BatchCounter  : Integer;
 Begin
     // Get workspace
     Try
@@ -97,104 +102,114 @@ Begin
     ViolationCount := 0;
     ErrorCount := 0;
     WarningCount := 0;
+    BatchCounter := 0;
     
-    // Build JSON
-    JSONStr := '{' + #13#10;
-    JSONStr := JSONStr + '  "verification_type": "DRC",' + #13#10;
-    
-    Try
-        JSONStr := JSONStr + '  "pcb_file": "' + EscapeJsonString(PCB.FileName) + '",' + #13#10;
-    Except
-        JSONStr := JSONStr + '  "pcb_file": "Unknown",' + #13#10;
-    End;
-    
-    // Get violations
-    JSONStr := JSONStr + '  "violations": [' + #13#10;
-    FirstItem := True;
-    
-    Try
-        Iterator := PCB.BoardIterator_Create;
-        If Iterator <> Nil Then
-        Begin
-            Try
-                Iterator.AddFilter_ObjectSet(MkSet(eViolationObject));
-                Iterator.AddFilter_LayerSet(AllLayers);
-                Iterator.AddFilter_Method(eProcessAll);
-                
-                Violation := Iterator.FirstPCBObject;
-                While Violation <> Nil Do
-                Begin
-                    Inc(ViolationCount);
-                    
-                    If Not FirstItem Then
-                        JSONStr := JSONStr + ',' + #13#10;
-                    FirstItem := False;
-                    
-                    JSONStr := JSONStr + '    {' + #13#10;
-                    
-                    JSONStr := JSONStr + '      "id": "DRC' + IntToStr(ViolationCount) + '",' + #13#10;
-                    
-                    Try
-                        JSONStr := JSONStr + '      "rule": "' + EscapeJsonString(Violation.Rule.Name) + '",' + #13#10;
-                    Except
-                        JSONStr := JSONStr + '      "rule": "Unknown",' + #13#10;
-                    End;
-                    
-                    Try
-                        JSONStr := JSONStr + '      "description": "' + EscapeJsonString(Violation.Description) + '",' + #13#10;
-                    Except
-                        JSONStr := JSONStr + '      "description": "",' + #13#10;
-                    End;
-                    
-                    Try
-                        JSONStr := JSONStr + '      "severity": "error",' + #13#10;
-                        Inc(ErrorCount);
-                    Except
-                        JSONStr := JSONStr + '      "severity": "unknown",' + #13#10;
-                    End;
-                    
-                    Try
-                        JSONStr := JSONStr + '      "location": {' + #13#10;
-                        JSONStr := JSONStr + '        "x_mm": ' + FormatFloat('0.00', CoordToMMs(Violation.X)) + ',' + #13#10;
-                        JSONStr := JSONStr + '        "y_mm": ' + FormatFloat('0.00', CoordToMMs(Violation.Y)) + #13#10;
-                        JSONStr := JSONStr + '      }' + #13#10;
-                    Except
-                        JSONStr := JSONStr + '      "location": {"x_mm": 0, "y_mm": 0}' + #13#10;
-                    End;
-                    
-                    JSONStr := JSONStr + '    }';
-                    
-                    Violation := Iterator.NextPCBObject;
-                End;
-            Finally
-                PCB.BoardIterator_Destroy(Iterator);
-            End;
-        End;
-    Except
-    End;
-    JSONStr := JSONStr + #13#10 + '  ],' + #13#10;
-    
-    // Summary
-    JSONStr := JSONStr + '  "summary": {' + #13#10;
-    JSONStr := JSONStr + '    "total_violations": ' + IntToStr(ViolationCount) + ',' + #13#10;
-    JSONStr := JSONStr + '    "errors": ' + IntToStr(ErrorCount) + ',' + #13#10;
-    JSONStr := JSONStr + '    "warnings": ' + IntToStr(WarningCount) + #13#10;
-    JSONStr := JSONStr + '  },' + #13#10;
-    
-    // Pass/Fail status
-    If ViolationCount = 0 Then
-        JSONStr := JSONStr + '  "status": "PASS"' + #13#10
-    Else
-        JSONStr := JSONStr + '  "status": "FAIL"' + #13#10;
-    
-    JSONStr := JSONStr + '}';
-    
-    // Write to file
+    // Create output file
     OutputFile := TStringList.Create;
     Try
-        OutputFile.Text := JSONStr;
-        FileName := BASE_PATH + 'verification_report.json';
+        // Start JSON
+        OutputFile.Add('{');
+        OutputFile.Add('  "verification_type": "DRC",');
         
+        Try
+            OutputFile.Add('  "pcb_file": "' + EscapeJsonString(PCB.FileName) + '",');
+        Except
+            OutputFile.Add('  "pcb_file": "Unknown",');
+        End;
+        
+        // Get violations
+        OutputFile.Add('  "violations": [');
+        FirstItem := True;
+        
+        Try
+            Iterator := PCB.BoardIterator_Create;
+            If Iterator <> Nil Then
+            Begin
+                Try
+                    Iterator.AddFilter_ObjectSet(MkSet(eViolationObject));
+                    Iterator.AddFilter_LayerSet(AllLayers);
+                    Iterator.AddFilter_Method(eProcessAll);
+                    
+                    Violation := Iterator.FirstPCBObject;
+                    While (Violation <> Nil) And (ViolationCount < MAX_VIOLATIONS) Do
+                    Begin
+                        Inc(ViolationCount);
+                        Inc(BatchCounter);
+                        
+                        // UI refresh every BATCH_SIZE items
+                        If BatchCounter >= BATCH_SIZE Then
+                        Begin
+                            BatchCounter := 0;
+                            Application.ProcessMessages;
+                            Sleep(1);
+                        End;
+                        
+                        If Not FirstItem Then
+                            OutputFile.Add(',');
+                        FirstItem := False;
+                        
+                        OutputFile.Add('    {');
+                        
+                        OutputFile.Add('      "id": "DRC' + IntToStr(ViolationCount) + '",');
+                        
+                        Try
+                            OutputFile.Add('      "rule": "' + EscapeJsonString(Violation.Rule.Name) + '",');
+                        Except
+                            OutputFile.Add('      "rule": "Unknown",');
+                        End;
+                        
+                        Try
+                            OutputFile.Add('      "description": "' + EscapeJsonString(Violation.Description) + '",');
+                        Except
+                            OutputFile.Add('      "description": "",');
+                        End;
+                        
+                        Try
+                            OutputFile.Add('      "severity": "error",');
+                            Inc(ErrorCount);
+                        Except
+                            OutputFile.Add('      "severity": "unknown",');
+                        End;
+                        
+                        Try
+                            OutputFile.Add('      "location": {');
+                            OutputFile.Add('        "x_mm": ' + FormatFloat('0.00', CoordToMMs(Violation.X)) + ',');
+                            OutputFile.Add('        "y_mm": ' + FormatFloat('0.00', CoordToMMs(Violation.Y)));
+                            OutputFile.Add('      }');
+                        Except
+                            OutputFile.Add('      "location": {"x_mm": 0, "y_mm": 0}');
+                        End;
+                        
+                        OutputFile.Add('    }');
+                        
+                        Violation := Iterator.NextPCBObject;
+                    End;
+                Finally
+                    PCB.BoardIterator_Destroy(Iterator);
+                End;
+            End;
+        Except
+        End;
+        
+        OutputFile.Add('  ],');
+        
+        // Summary
+        OutputFile.Add('  "summary": {');
+        OutputFile.Add('    "total_violations": ' + IntToStr(ViolationCount) + ',');
+        OutputFile.Add('    "errors": ' + IntToStr(ErrorCount) + ',');
+        OutputFile.Add('    "warnings": ' + IntToStr(WarningCount));
+        OutputFile.Add('  },');
+        
+        // Pass/Fail status
+        If ViolationCount = 0 Then
+            OutputFile.Add('  "status": "PASS"')
+        Else
+            OutputFile.Add('  "status": "FAIL"');
+        
+        OutputFile.Add('}');
+        
+        // Save to file
+        FileName := BASE_PATH + 'verification_report.json';
         Try
             OutputFile.SaveToFile(FileName);
             If ViolationCount = 0 Then

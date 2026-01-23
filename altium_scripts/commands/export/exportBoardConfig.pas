@@ -2,10 +2,12 @@
  * Export Board Config Command
  * Exports board configuration to board_config.json
  * Command: export_board_config
+ * OPTIMIZED: Direct TStringList writing, removed JSONStr concatenation
  *}
 
 Const
-    BASE_PATH = 'E:\Workspace\AI\11.10.WayNe\new-version\';
+    BASE_PATH = 'D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent\';
+    MAX_LAYERS = 100;  // Safety limit
 
 // Helper function to escape JSON strings
 Function EscapeJsonString(InputStr: String): String;
@@ -15,6 +17,8 @@ Var
     Ch: Char;
 Begin
     ResultStr := '';
+    If Length(InputStr) > 500 Then
+        InputStr := Copy(InputStr, 1, 500);  // Limit string length
     For I := 1 To Length(InputStr) Do
     Begin
         Ch := InputStr[I];
@@ -44,7 +48,6 @@ Var
     Doc           : IDocument;
     OutputFile    : TStringList;
     FileName      : String;
-    JSONStr       : String;
     BoardRect     : TCoordRect;
     Width, Height : Double;
     OriginX       : Double;
@@ -119,137 +122,138 @@ Begin
         OriginY := 0;
     End;
     
-    // Build JSON
-    JSONStr := '{' + #13#10;
-    
-    Try
-        JSONStr := JSONStr + '  "pcb_file": "' + EscapeJsonString(PCB.FileName) + '",' + #13#10;
-    Except
-        JSONStr := JSONStr + '  "pcb_file": "Unknown",' + #13#10;
-    End;
-    
-    // Board dimensions
-    JSONStr := JSONStr + '  "board": {' + #13#10;
-    JSONStr := JSONStr + '    "width_mm": ' + FormatFloat('0.00', Width) + ',' + #13#10;
-    JSONStr := JSONStr + '    "height_mm": ' + FormatFloat('0.00', Height) + ',' + #13#10;
-    JSONStr := JSONStr + '    "area_mm2": ' + FormatFloat('0.00', Width * Height) + ',' + #13#10;
-    JSONStr := JSONStr + '    "origin": {' + #13#10;
-    JSONStr := JSONStr + '      "x_mm": ' + FormatFloat('0.00', OriginX) + ',' + #13#10;
-    JSONStr := JSONStr + '      "y_mm": ' + FormatFloat('0.00', OriginY) + #13#10;
-    JSONStr := JSONStr + '    }' + #13#10;
-    JSONStr := JSONStr + '  },' + #13#10;
-    
-    // Layer stack
-    JSONStr := JSONStr + '  "layer_stack": {' + #13#10;
-    
-    LayerCount := 0;
-    SignalLayers := 0;
-    
-    Try
-        LayerStack := PCB.LayerStack;
-        If LayerStack <> Nil Then
-        Begin
-            LayerCount := LayerStack.LayersCount;
-            SignalLayers := LayerStack.SignalLayerCount;
-        End;
-    Except
-    End;
-    
-    JSONStr := JSONStr + '    "total_layers": ' + IntToStr(LayerCount) + ',' + #13#10;
-    JSONStr := JSONStr + '    "signal_layers": ' + IntToStr(SignalLayers) + ',' + #13#10;
-    
-    // Layer details
-    JSONStr := JSONStr + '    "layers": [' + #13#10;
-    FirstItem := True;
-    
-    Try
-        If LayerStack <> Nil Then
-        Begin
-            For I := 1 To LayerStack.LayersCount Do
-            Begin
-                Layer := LayerStack.LayerObject(I);
-                If Layer <> Nil Then
-                Begin
-                    If Not FirstItem Then
-                        JSONStr := JSONStr + ',' + #13#10;
-                    FirstItem := False;
-                    
-                    JSONStr := JSONStr + '      {' + #13#10;
-                    
-                    Try
-                        LayerName := Layer.Name;
-                    Except
-                        LayerName := 'Layer ' + IntToStr(I);
-                    End;
-                    JSONStr := JSONStr + '        "name": "' + EscapeJsonString(LayerName) + '",' + #13#10;
-                    
-                    Try
-                        JSONStr := JSONStr + '        "layer_id": ' + IntToStr(Layer.LayerID) + ',' + #13#10;
-                    Except
-                        JSONStr := JSONStr + '        "layer_id": ' + IntToStr(I) + ',' + #13#10;
-                    End;
-                    
-                    Try
-                        If Layer.IsSignalLayer Then
-                            JSONStr := JSONStr + '        "type": "signal",' + #13#10
-                        Else If Layer.IsDielectric Then
-                            JSONStr := JSONStr + '        "type": "dielectric",' + #13#10
-                        Else If Layer.IsPlane Then
-                            JSONStr := JSONStr + '        "type": "plane",' + #13#10
-                        Else
-                            JSONStr := JSONStr + '        "type": "other",' + #13#10;
-                    Except
-                        JSONStr := JSONStr + '        "type": "unknown",' + #13#10;
-                    End;
-                    
-                    Try
-                        JSONStr := JSONStr + '        "copper_thickness_mm": ' + FormatFloat('0.000', CoordToMMs(Layer.CopperThickness)) + ',' + #13#10;
-                    Except
-                        JSONStr := JSONStr + '        "copper_thickness_mm": 0.035,' + #13#10;
-                    End;
-                    
-                    Try
-                        JSONStr := JSONStr + '        "dielectric_thickness_mm": ' + FormatFloat('0.000', CoordToMMs(Layer.DielectricThickness)) + #13#10;
-                    Except
-                        JSONStr := JSONStr + '        "dielectric_thickness_mm": 0' + #13#10;
-                    End;
-                    
-                    JSONStr := JSONStr + '      }';
-                End;
-            End;
-        End;
-    Except
-    End;
-    
-    JSONStr := JSONStr + #13#10 + '    ]' + #13#10;
-    JSONStr := JSONStr + '  },' + #13#10;
-    
-    // Units
-    Try
-        If PCB.DisplayUnit = eImperial Then
-            JSONStr := JSONStr + '  "display_unit": "mil",' + #13#10
-        Else
-            JSONStr := JSONStr + '  "display_unit": "mm",' + #13#10;
-    Except
-        JSONStr := JSONStr + '  "display_unit": "mm",' + #13#10;
-    End;
-    
-    // Grid
-    Try
-        JSONStr := JSONStr + '  "snap_grid_mm": ' + FormatFloat('0.000', CoordToMMs(PCB.SnapGridSize)) + ',' + #13#10;
-    Except
-        JSONStr := JSONStr + '  "snap_grid_mm": 0.1,' + #13#10;
-    End;
-    
-    JSONStr := JSONStr + '  "status": "success"' + #13#10;
-    JSONStr := JSONStr + '}';
-    
-    // Write to file
+    // Create output file
     OutputFile := TStringList.Create;
     Try
-        OutputFile.Text := JSONStr;
-        FileName := BASE_PATH + 'board_config.json';
+        // Start JSON
+        OutputFile.Add('{');
         
+        Try
+            OutputFile.Add('  "pcb_file": "' + EscapeJsonString(PCB.FileName) + '",');
+        Except
+            OutputFile.Add('  "pcb_file": "Unknown",');
+        End;
+        
+        // Board dimensions
+        OutputFile.Add('  "board": {');
+        OutputFile.Add('    "width_mm": ' + FormatFloat('0.00', Width) + ',');
+        OutputFile.Add('    "height_mm": ' + FormatFloat('0.00', Height) + ',');
+        OutputFile.Add('    "area_mm2": ' + FormatFloat('0.00', Width * Height) + ',');
+        OutputFile.Add('    "origin": {');
+        OutputFile.Add('      "x_mm": ' + FormatFloat('0.00', OriginX) + ',');
+        OutputFile.Add('      "y_mm": ' + FormatFloat('0.00', OriginY));
+        OutputFile.Add('    }');
+        OutputFile.Add('  },');
+        
+        // Layer stack
+        OutputFile.Add('  "layer_stack": {');
+        
+        LayerCount := 0;
+        SignalLayers := 0;
+        
+        Try
+            LayerStack := PCB.LayerStack;
+            If LayerStack <> Nil Then
+            Begin
+                LayerCount := LayerStack.LayersCount;
+                SignalLayers := LayerStack.SignalLayerCount;
+            End;
+        Except
+        End;
+        
+        OutputFile.Add('    "total_layers": ' + IntToStr(LayerCount) + ',');
+        OutputFile.Add('    "signal_layers": ' + IntToStr(SignalLayers) + ',');
+        
+        // Layer details
+        OutputFile.Add('    "layers": [');
+        FirstItem := True;
+        
+        Try
+            If LayerStack <> Nil Then
+            Begin
+                For I := 1 To LayerStack.LayersCount Do
+                Begin
+                    If I > MAX_LAYERS Then Break;  // Safety limit
+                    
+                    Layer := LayerStack.LayerObject(I);
+                    If Layer <> Nil Then
+                    Begin
+                        If Not FirstItem Then
+                            OutputFile.Add(',');
+                        FirstItem := False;
+                        
+                        OutputFile.Add('      {');
+                        
+                        Try
+                            LayerName := Layer.Name;
+                        Except
+                            LayerName := 'Layer ' + IntToStr(I);
+                        End;
+                        OutputFile.Add('        "name": "' + EscapeJsonString(LayerName) + '",');
+                        
+                        Try
+                            OutputFile.Add('        "layer_id": ' + IntToStr(Layer.LayerID) + ',');
+                        Except
+                            OutputFile.Add('        "layer_id": ' + IntToStr(I) + ',');
+                        End;
+                        
+                        Try
+                            If Layer.IsSignalLayer Then
+                                OutputFile.Add('        "type": "signal",')
+                            Else If Layer.IsDielectric Then
+                                OutputFile.Add('        "type": "dielectric",')
+                            Else If Layer.IsPlane Then
+                                OutputFile.Add('        "type": "plane",')
+                            Else
+                                OutputFile.Add('        "type": "other",');
+                        Except
+                            OutputFile.Add('        "type": "unknown",');
+                        End;
+                        
+                        Try
+                            OutputFile.Add('        "copper_thickness_mm": ' + FormatFloat('0.000', CoordToMMs(Layer.CopperThickness)) + ',');
+                        Except
+                            OutputFile.Add('        "copper_thickness_mm": 0.035,');
+                        End;
+                        
+                        Try
+                            OutputFile.Add('        "dielectric_thickness_mm": ' + FormatFloat('0.000', CoordToMMs(Layer.DielectricThickness)));
+                        Except
+                            OutputFile.Add('        "dielectric_thickness_mm": 0');
+                        End;
+                        
+                        OutputFile.Add('      }');
+                    End;
+                End;
+            End;
+        Except
+        End;
+        
+        OutputFile.Add('    ]');
+        OutputFile.Add('  },');
+        
+        // Units
+        Try
+            If PCB.DisplayUnit = eImperial Then
+                OutputFile.Add('  "display_unit": "mil",')
+            Else
+                OutputFile.Add('  "display_unit": "mm",');
+        Except
+            OutputFile.Add('  "display_unit": "mm",');
+        End;
+        
+        // Grid
+        Try
+            OutputFile.Add('  "snap_grid_mm": ' + FormatFloat('0.000', CoordToMMs(PCB.SnapGridSize)) + ',');
+        Except
+            OutputFile.Add('  "snap_grid_mm": 0.1,');
+        End;
+        
+        OutputFile.Add('  "status": "success"');
+        OutputFile.Add('}');
+        
+        // Save to file
+        FileName := BASE_PATH + 'board_config.json';
         Try
             OutputFile.SaveToFile(FileName);
             ShowMessage('Board Configuration Exported!' + #13#10 + #13#10 +

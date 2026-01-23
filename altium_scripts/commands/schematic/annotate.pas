@@ -98,7 +98,7 @@ Var
     CommandStart: Integer;
     Success: Boolean;
 Begin
-    FileName := 'E:\Workspace\AI\11.10.WayNe\new-version\schematic_commands.json';
+    FileName := 'D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent\schematic_commands.json';
     
     If Not FileExists(FileName) Then
     Begin

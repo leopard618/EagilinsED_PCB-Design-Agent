@@ -2,20 +2,63 @@
  * Export Schematic Info Command
  * Exports comprehensive schematic information to schematic_info.json
  * Command: export_schematic_info
+ * ULTRA-OPTIMIZED: Direct TStringList writing, removed JSONStr concatenation, limits, batch processing
  *}
 
 Const
-    BASE_PATH = 'E:\Workspace\AI\11.10.WayNe\new-version\';
+    BASE_PATH = 'D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent\';
+    MAX_COMPONENTS = 200;    // EXTREME limit for 23GB memory situation
+    MAX_WIRES = 500;         // EXTREME limit for 23GB memory situation
+    MAX_NETLABELS = 100;     // EXTREME limit for 23GB memory situation
+    MAX_POWERPORTS = 50;     // EXTREME limit for 23GB memory situation
+    MAX_PORTS = 50;          // EXTREME limit for 23GB memory situation
+    BATCH_SIZE = 10;         // Very frequent refresh for memory cleanup
 
-// Helper function to escape JSON strings
+// Optimized helper function to escape JSON strings
+// Uses pre-check to avoid unnecessary concatenations
 Function EscapeJsonString(InputStr: String): String;
 Var
-    I: Integer;
+    I, Len: Integer;
     ResultStr: String;
     Ch: Char;
+    NeedsEscape: Boolean;
 Begin
+    Len := Length(InputStr);
+    If Len > 200 Then
+    Begin
+        InputStr := Copy(InputStr, 1, 200);
+        Len := 200;
+    End;
+    
+    If Len = 0 Then
+    Begin
+        Result := '';
+        Exit;
+    End;
+    
+    // Quick check if escaping is needed
+    NeedsEscape := False;
+    For I := 1 To Len Do
+    Begin
+        Ch := InputStr[I];
+        If (Ch = '"') Or (Ch = '\') Or (Ch = #13) Or (Ch = #10) Or (Ch = #9) Or 
+           ((Ord(Ch) < 32) Or (Ord(Ch) > 126)) Then
+        Begin
+            NeedsEscape := True;
+            Break;
+        End;
+    End;
+    
+    // If no escaping needed, return as-is (common case optimization)
+    If Not NeedsEscape Then
+    Begin
+        Result := InputStr;
+        Exit;
+    End;
+    
+    // Build escaped string
     ResultStr := '';
-    For I := 1 To Length(InputStr) Do
+    For I := 1 To Len Do
     Begin
         Ch := InputStr[I];
         If Ch = '"' Then
@@ -60,7 +103,6 @@ Var
     Parameter     : ISch_Parameter;
     OutputFile    : TStringList;
     FileName      : String;
-    JSONStr       : String;
     FirstItem     : Boolean;
     CompCount     : Integer;
     WireCount     : Integer;
@@ -73,8 +115,11 @@ Var
     ValueStr      : String;
     FootprintStr  : String;
     LibRefStr     : String;
+    CompX, CompY  : Double;  // Cache coordinates
     PinIterator   : ISch_Iterator;
     PinFirst      : Boolean;
+    BatchCounter  : Integer;
+    SafetyCounter : Integer;
 Begin
     // Get current schematic
     CurrentSheet := Nil;
@@ -115,451 +160,532 @@ Begin
     NetLabelCount := 0;
     PowerCount := 0;
     PortCount := 0;
+    BatchCounter := 0;
+    SafetyCounter := 0;
     
-    // Build JSON
-    JSONStr := '{' + #13#10;
-    
-    // Sheet information
-    JSONStr := JSONStr + '  "schematic": {' + #13#10;
-    Try
-        JSONStr := JSONStr + '    "name": "' + EscapeJsonString(CurrentSheet.DocumentName) + '",' + #13#10;
-    Except
-        JSONStr := JSONStr + '    "name": "Unknown",' + #13#10;
-    End;
-    
-    Try
-        JSONStr := JSONStr + '    "sheet_style": "' + EscapeJsonString(CurrentSheet.SheetStyle) + '",' + #13#10;
-    Except
-        JSONStr := JSONStr + '    "sheet_style": "A4",' + #13#10;
-    End;
-    
-    Try
-        JSONStr := JSONStr + '    "title": "' + EscapeJsonString(CurrentSheet.Title) + '",' + #13#10;
-        JSONStr := JSONStr + '    "document_number": "' + EscapeJsonString(CurrentSheet.DocumentNumber) + '",' + #13#10;
-        JSONStr := JSONStr + '    "revision": "' + EscapeJsonString(CurrentSheet.Revision) + '"' + #13#10;
-    Except
-        JSONStr := JSONStr + '    "title": "",' + #13#10;
-        JSONStr := JSONStr + '    "document_number": "",' + #13#10;
-        JSONStr := JSONStr + '    "revision": ""' + #13#10;
-    End;
-    JSONStr := JSONStr + '  },' + #13#10;
-    
-    // ========== COMPONENTS ==========
-    JSONStr := JSONStr + '  "components": [' + #13#10;
-    FirstItem := True;
-    
-    Try
-        Iterator := CurrentSheet.SchIterator_Create;
-        If Iterator <> Nil Then
-        Begin
-            Try
-                Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
-                
-                Component := Iterator.FirstSchObject;
-                While Component <> Nil Do
-                Begin
-                    Inc(CompCount);
-                    
-                    If Not FirstItem Then
-                        JSONStr := JSONStr + ',' + #13#10;
-                    FirstItem := False;
-                    
-                    JSONStr := JSONStr + '    {' + #13#10;
-                    
-                    // Designator
-                    Try
-                        DesignatorStr := Component.Designator.Text;
-                        If DesignatorStr = '' Then DesignatorStr := 'Unknown';
-                    Except
-                        DesignatorStr := 'Unknown';
-                    End;
-                    JSONStr := JSONStr + '      "designator": "' + EscapeJsonString(DesignatorStr) + '",' + #13#10;
-                    
-                    // Comment (usually the value)
-                    Try
-                        ValueStr := Component.Comment.Text;
-                    Except
-                        ValueStr := '';
-                    End;
-                    JSONStr := JSONStr + '      "value": "' + EscapeJsonString(ValueStr) + '",' + #13#10;
-                    
-                    // Library reference
-                    Try
-                        LibRefStr := Component.LibReference;
-                    Except
-                        LibRefStr := '';
-                    End;
-                    JSONStr := JSONStr + '      "library_ref": "' + EscapeJsonString(LibRefStr) + '",' + #13#10;
-                    
-                    // Source library
-                    Try
-                        TempStr := Component.SourceLibraryName;
-                    Except
-                        TempStr := '';
-                    End;
-                    JSONStr := JSONStr + '      "source_library": "' + EscapeJsonString(TempStr) + '",' + #13#10;
-                    
-                    // Footprint
-                    Try
-                        FootprintStr := Component.Footprint;
-                        If FootprintStr = '' Then
-                        Begin
-                            For I := 0 To Component.ParameterCount - 1 Do
-                            Begin
-                                Parameter := Component.SchParameters(I);
-                                If (Parameter <> Nil) And (LowerCase(Parameter.Name) = 'footprint') Then
-                                Begin
-                                    FootprintStr := Parameter.Text;
-                                    Break;
-                                End;
-                            End;
-                        End;
-                    Except
-                        FootprintStr := '';
-                    End;
-                    JSONStr := JSONStr + '      "footprint": "' + EscapeJsonString(FootprintStr) + '",' + #13#10;
-                    
-                    // Location
-                    Try
-                        JSONStr := JSONStr + '      "location": {' + #13#10;
-                        JSONStr := JSONStr + '        "x": ' + FormatFloat('0.00', CoordToMM(Component.Location.X)) + ',' + #13#10;
-                        JSONStr := JSONStr + '        "y": ' + FormatFloat('0.00', CoordToMM(Component.Location.Y)) + #13#10;
-                        JSONStr := JSONStr + '      },' + #13#10;
-                    Except
-                        JSONStr := JSONStr + '      "location": {"x": 0, "y": 0},' + #13#10;
-                    End;
-                    
-                    // Orientation
-                    Try
-                        JSONStr := JSONStr + '      "orientation": ' + IntToStr(Component.Orientation) + ',' + #13#10;
-                    Except
-                        JSONStr := JSONStr + '      "orientation": 0,' + #13#10;
-                    End;
-                    
-                    // Mirrored
-                    Try
-                        If Component.IsMirrored Then
-                            JSONStr := JSONStr + '      "mirrored": true,' + #13#10
-                        Else
-                            JSONStr := JSONStr + '      "mirrored": false,' + #13#10;
-                    Except
-                        JSONStr := JSONStr + '      "mirrored": false,' + #13#10;
-                    End;
-                    
-                    // Pins
-                    JSONStr := JSONStr + '      "pins": [';
-                    PinFirst := True;
-                    Try
-                        PinIterator := Component.SchIterator_Create;
-                        If PinIterator <> Nil Then
-                        Begin
-                            Try
-                                PinIterator.AddFilter_ObjectSet(MkSet(ePin));
-                                Pin := PinIterator.FirstSchObject;
-                                While Pin <> Nil Do
-                                Begin
-                                    If Not PinFirst Then
-                                        JSONStr := JSONStr + ',';
-                                    PinFirst := False;
-                                    
-                                    JSONStr := JSONStr + #13#10 + '        {' + #13#10;
-                                    Try
-                                        JSONStr := JSONStr + '          "name": "' + EscapeJsonString(Pin.Name) + '",' + #13#10;
-                                        JSONStr := JSONStr + '          "designator": "' + EscapeJsonString(Pin.Designator) + '",' + #13#10;
-                                        If Pin.Net <> Nil Then
-                                            JSONStr := JSONStr + '          "net": "' + EscapeJsonString(Pin.Net.Name) + '"' + #13#10
-                                        Else
-                                            JSONStr := JSONStr + '          "net": ""' + #13#10;
-                                    Except
-                                        JSONStr := JSONStr + '          "name": "",' + #13#10;
-                                        JSONStr := JSONStr + '          "designator": "",' + #13#10;
-                                        JSONStr := JSONStr + '          "net": ""' + #13#10;
-                                    End;
-                                    JSONStr := JSONStr + '        }';
-                                    
-                                    Pin := PinIterator.NextSchObject;
-                                End;
-                            Finally
-                                Component.SchIterator_Destroy(PinIterator);
-                            End;
-                        End;
-                    Except
-                    End;
-                    JSONStr := JSONStr + #13#10 + '      ],' + #13#10;
-                    
-                    // Parameters
-                    JSONStr := JSONStr + '      "parameters": [';
-                    PinFirst := True;
-                    Try
-                        For I := 0 To Component.ParameterCount - 1 Do
-                        Begin
-                            Parameter := Component.SchParameters(I);
-                            If Parameter <> Nil Then
-                            Begin
-                                If Not PinFirst Then
-                                    JSONStr := JSONStr + ',';
-                                PinFirst := False;
-                                
-                                JSONStr := JSONStr + #13#10 + '        {' + #13#10;
-                                Try
-                                    JSONStr := JSONStr + '          "name": "' + EscapeJsonString(Parameter.Name) + '",' + #13#10;
-                                    JSONStr := JSONStr + '          "value": "' + EscapeJsonString(Parameter.Text) + '"' + #13#10;
-                                Except
-                                    JSONStr := JSONStr + '          "name": "",' + #13#10;
-                                    JSONStr := JSONStr + '          "value": ""' + #13#10;
-                                End;
-                                JSONStr := JSONStr + '        }';
-                            End;
-                        End;
-                    Except
-                    End;
-                    JSONStr := JSONStr + #13#10 + '      ]' + #13#10;
-                    
-                    JSONStr := JSONStr + '    }';
-                    
-                    Component := Iterator.NextSchObject;
-                End;
-            Finally
-                CurrentSheet.SchIterator_Destroy(Iterator);
-            End;
-        End;
-    Except
-    End;
-    JSONStr := JSONStr + #13#10 + '  ],' + #13#10;
-    
-    // ========== WIRES ==========
-    JSONStr := JSONStr + '  "wires": [' + #13#10;
-    FirstItem := True;
-    
-    Try
-        Iterator := CurrentSheet.SchIterator_Create;
-        If Iterator <> Nil Then
-        Begin
-            Try
-                Iterator.AddFilter_ObjectSet(MkSet(eWire));
-                
-                Wire := Iterator.FirstSchObject;
-                While Wire <> Nil Do
-                Begin
-                    Inc(WireCount);
-                    
-                    If Not FirstItem Then
-                        JSONStr := JSONStr + ',' + #13#10;
-                    FirstItem := False;
-                    
-                    JSONStr := JSONStr + '    {' + #13#10;
-                    
-                    // Vertices
-                    JSONStr := JSONStr + '      "vertices": [' + #13#10;
-                    Try
-                        For I := 1 To Wire.VerticesCount Do
-                        Begin
-                            If I > 1 Then
-                                JSONStr := JSONStr + ',' + #13#10;
-                            JSONStr := JSONStr + '        {"x": ' + FormatFloat('0.00', CoordToMM(Wire.Vertex(I).X)) + 
-                                       ', "y": ' + FormatFloat('0.00', CoordToMM(Wire.Vertex(I).Y)) + '}';
-                        End;
-                    Except
-                    End;
-                    JSONStr := JSONStr + #13#10 + '      ],' + #13#10;
-                    
-                    // Net name
-                    Try
-                        If Wire.Net <> Nil Then
-                            JSONStr := JSONStr + '      "net": "' + EscapeJsonString(Wire.Net.Name) + '"' + #13#10
-                        Else
-                            JSONStr := JSONStr + '      "net": ""' + #13#10;
-                    Except
-                        JSONStr := JSONStr + '      "net": ""' + #13#10;
-                    End;
-                    
-                    JSONStr := JSONStr + '    }';
-                    
-                    Wire := Iterator.NextSchObject;
-                End;
-            Finally
-                CurrentSheet.SchIterator_Destroy(Iterator);
-            End;
-        End;
-    Except
-    End;
-    JSONStr := JSONStr + #13#10 + '  ],' + #13#10;
-    
-    // ========== NET LABELS ==========
-    JSONStr := JSONStr + '  "net_labels": [' + #13#10;
-    FirstItem := True;
-    
-    Try
-        Iterator := CurrentSheet.SchIterator_Create;
-        If Iterator <> Nil Then
-        Begin
-            Try
-                Iterator.AddFilter_ObjectSet(MkSet(eNetLabel));
-                
-                NetLabel := Iterator.FirstSchObject;
-                While NetLabel <> Nil Do
-                Begin
-                    Inc(NetLabelCount);
-                    
-                    If Not FirstItem Then
-                        JSONStr := JSONStr + ',' + #13#10;
-                    FirstItem := False;
-                    
-                    JSONStr := JSONStr + '    {' + #13#10;
-                    
-                    Try
-                        JSONStr := JSONStr + '      "name": "' + EscapeJsonString(NetLabel.Text) + '",' + #13#10;
-                        JSONStr := JSONStr + '      "location": {' + #13#10;
-                        JSONStr := JSONStr + '        "x": ' + FormatFloat('0.00', CoordToMM(NetLabel.Location.X)) + ',' + #13#10;
-                        JSONStr := JSONStr + '        "y": ' + FormatFloat('0.00', CoordToMM(NetLabel.Location.Y)) + #13#10;
-                        JSONStr := JSONStr + '      },' + #13#10;
-                        JSONStr := JSONStr + '      "orientation": ' + IntToStr(NetLabel.Orientation) + #13#10;
-                    Except
-                        JSONStr := JSONStr + '      "name": "",' + #13#10;
-                        JSONStr := JSONStr + '      "location": {"x": 0, "y": 0},' + #13#10;
-                        JSONStr := JSONStr + '      "orientation": 0' + #13#10;
-                    End;
-                    
-                    JSONStr := JSONStr + '    }';
-                    
-                    NetLabel := Iterator.NextSchObject;
-                End;
-            Finally
-                CurrentSheet.SchIterator_Destroy(Iterator);
-            End;
-        End;
-    Except
-    End;
-    JSONStr := JSONStr + #13#10 + '  ],' + #13#10;
-    
-    // ========== POWER PORTS ==========
-    JSONStr := JSONStr + '  "power_ports": [' + #13#10;
-    FirstItem := True;
-    
-    Try
-        Iterator := CurrentSheet.SchIterator_Create;
-        If Iterator <> Nil Then
-        Begin
-            Try
-                Iterator.AddFilter_ObjectSet(MkSet(ePowerObject));
-                
-                PowerPort := Iterator.FirstSchObject;
-                While PowerPort <> Nil Do
-                Begin
-                    Inc(PowerCount);
-                    
-                    If Not FirstItem Then
-                        JSONStr := JSONStr + ',' + #13#10;
-                    FirstItem := False;
-                    
-                    JSONStr := JSONStr + '    {' + #13#10;
-                    
-                    Try
-                        JSONStr := JSONStr + '      "name": "' + EscapeJsonString(PowerPort.Text) + '",' + #13#10;
-                        JSONStr := JSONStr + '      "style": "' + EscapeJsonString(PowerPort.Style) + '",' + #13#10;
-                        JSONStr := JSONStr + '      "location": {' + #13#10;
-                        JSONStr := JSONStr + '        "x": ' + FormatFloat('0.00', CoordToMM(PowerPort.Location.X)) + ',' + #13#10;
-                        JSONStr := JSONStr + '        "y": ' + FormatFloat('0.00', CoordToMM(PowerPort.Location.Y)) + #13#10;
-                        JSONStr := JSONStr + '      },' + #13#10;
-                        If PowerPort.Net <> Nil Then
-                            JSONStr := JSONStr + '      "net": "' + EscapeJsonString(PowerPort.Net.Name) + '"' + #13#10
-                        Else
-                            JSONStr := JSONStr + '      "net": "' + EscapeJsonString(PowerPort.Text) + '"' + #13#10;
-                    Except
-                        JSONStr := JSONStr + '      "name": "",' + #13#10;
-                        JSONStr := JSONStr + '      "style": "",' + #13#10;
-                        JSONStr := JSONStr + '      "location": {"x": 0, "y": 0},' + #13#10;
-                        JSONStr := JSONStr + '      "net": ""' + #13#10;
-                    End;
-                    
-                    JSONStr := JSONStr + '    }';
-                    
-                    PowerPort := Iterator.NextSchObject;
-                End;
-            Finally
-                CurrentSheet.SchIterator_Destroy(Iterator);
-            End;
-        End;
-    Except
-    End;
-    JSONStr := JSONStr + #13#10 + '  ],' + #13#10;
-    
-    // ========== PORTS ==========
-    JSONStr := JSONStr + '  "ports": [' + #13#10;
-    FirstItem := True;
-    
-    Try
-        Iterator := CurrentSheet.SchIterator_Create;
-        If Iterator <> Nil Then
-        Begin
-            Try
-                Iterator.AddFilter_ObjectSet(MkSet(ePort));
-                
-                Port := Iterator.FirstSchObject;
-                While Port <> Nil Do
-                Begin
-                    Inc(PortCount);
-                    
-                    If Not FirstItem Then
-                        JSONStr := JSONStr + ',' + #13#10;
-                    FirstItem := False;
-                    
-                    JSONStr := JSONStr + '    {' + #13#10;
-                    
-                    Try
-                        JSONStr := JSONStr + '      "name": "' + EscapeJsonString(Port.Name) + '",' + #13#10;
-                        JSONStr := JSONStr + '      "io_type": "' + EscapeJsonString(Port.IOType) + '",' + #13#10;
-                        JSONStr := JSONStr + '      "location": {' + #13#10;
-                        JSONStr := JSONStr + '        "x": ' + FormatFloat('0.00', CoordToMM(Port.Location.X)) + ',' + #13#10;
-                        JSONStr := JSONStr + '        "y": ' + FormatFloat('0.00', CoordToMM(Port.Location.Y)) + #13#10;
-                        JSONStr := JSONStr + '      }' + #13#10;
-                    Except
-                        JSONStr := JSONStr + '      "name": "",' + #13#10;
-                        JSONStr := JSONStr + '      "io_type": "",' + #13#10;
-                        JSONStr := JSONStr + '      "location": {"x": 0, "y": 0}"' + #13#10;
-                    End;
-                    
-                    JSONStr := JSONStr + '    }';
-                    
-                    Port := Iterator.NextSchObject;
-                End;
-            Finally
-                CurrentSheet.SchIterator_Destroy(Iterator);
-            End;
-        End;
-    Except
-    End;
-    JSONStr := JSONStr + #13#10 + '  ],' + #13#10;
-    
-    // Statistics
-    JSONStr := JSONStr + '  "statistics": {' + #13#10;
-    JSONStr := JSONStr + '    "component_count": ' + IntToStr(CompCount) + ',' + #13#10;
-    JSONStr := JSONStr + '    "wire_count": ' + IntToStr(WireCount) + ',' + #13#10;
-    JSONStr := JSONStr + '    "net_label_count": ' + IntToStr(NetLabelCount) + ',' + #13#10;
-    JSONStr := JSONStr + '    "power_port_count": ' + IntToStr(PowerCount) + ',' + #13#10;
-    JSONStr := JSONStr + '    "port_count": ' + IntToStr(PortCount) + #13#10;
-    JSONStr := JSONStr + '  },' + #13#10;
-    
-    JSONStr := JSONStr + '  "status": "active"' + #13#10;
-    JSONStr := JSONStr + '}';
-    
-    // Write to file
+    // Create output file
     OutputFile := TStringList.Create;
     Try
-        OutputFile.Text := JSONStr;
-        FileName := BASE_PATH + 'schematic_info.json';
+        // Start JSON
+        OutputFile.Add('{');
+        
+        // Sheet information
+        OutputFile.Add('  "schematic": {');
+        Try
+            TempStr := CurrentSheet.DocumentName;
+            If Length(TempStr) > 200 Then TempStr := Copy(TempStr, 1, 200);
+            OutputFile.Add('    "name": "' + EscapeJsonString(TempStr) + '",');
+        Except
+            OutputFile.Add('    "name": "Unknown",');
+        End;
         
         Try
+            TempStr := CurrentSheet.SheetStyle;
+            If Length(TempStr) > 50 Then TempStr := Copy(TempStr, 1, 50);
+            OutputFile.Add('    "sheet_style": "' + EscapeJsonString(TempStr) + '",');
+        Except
+            OutputFile.Add('    "sheet_style": "A4",');
+        End;
+        
+        Try
+            TempStr := CurrentSheet.Title;
+            If Length(TempStr) > 200 Then TempStr := Copy(TempStr, 1, 200);
+            OutputFile.Add('    "title": "' + EscapeJsonString(TempStr) + '",');
+            TempStr := CurrentSheet.DocumentNumber;
+            If Length(TempStr) > 100 Then TempStr := Copy(TempStr, 1, 100);
+            OutputFile.Add('    "document_number": "' + EscapeJsonString(TempStr) + '",');
+            TempStr := CurrentSheet.Revision;
+            If Length(TempStr) > 50 Then TempStr := Copy(TempStr, 1, 50);
+            OutputFile.Add('    "revision": "' + EscapeJsonString(TempStr) + '"');
+        Except
+            OutputFile.Add('    "title": "",');
+            OutputFile.Add('    "document_number": "",');
+            OutputFile.Add('    "revision": ""');
+        End;
+        OutputFile.Add('  },');
+        
+        // ========== COMPONENTS ==========
+        OutputFile.Add('  "components": [');
+        FirstItem := True;
+        
+        Try
+            Iterator := CurrentSheet.SchIterator_Create;
+            If Iterator <> Nil Then
+            Begin
+                Try
+                    Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+                    
+                    Component := Iterator.FirstSchObject;
+                    While (Component <> Nil) And (CompCount < MAX_COMPONENTS) Do
+                    Begin
+                        Inc(CompCount);
+                        Inc(BatchCounter);
+                        
+                        // UI refresh every BATCH_SIZE items
+                        If BatchCounter >= BATCH_SIZE Then
+                        Begin
+                            BatchCounter := 0;
+                            Application.ProcessMessages;
+                            Sleep(5);  // Longer sleep for memory cleanup
+                        End;
+                        
+                        If Not FirstItem Then
+                            OutputFile.Add(',');
+                        FirstItem := False;
+                        
+                        OutputFile.Add('    {');
+                        
+                        // Designator
+                        Try
+                            DesignatorStr := Component.Designator.Text;
+                            If DesignatorStr = '' Then DesignatorStr := 'Unknown';
+                        Except
+                            DesignatorStr := 'Unknown';
+                        End;
+                        OutputFile.Add('      "designator": "' + EscapeJsonString(DesignatorStr) + '",');
+                        
+                        // Comment (usually the value)
+                        Try
+                            ValueStr := Component.Comment.Text;
+                        Except
+                            ValueStr := '';
+                        End;
+                        OutputFile.Add('      "value": "' + EscapeJsonString(ValueStr) + '",');
+                        
+                        // Library reference
+                        Try
+                            LibRefStr := Component.LibReference;
+                        Except
+                            LibRefStr := '';
+                        End;
+                        OutputFile.Add('      "library_ref": "' + EscapeJsonString(LibRefStr) + '",');
+                        
+                        // Source library
+                        Try
+                            TempStr := Component.SourceLibraryName;
+                        Except
+                            TempStr := '';
+                        End;
+                        OutputFile.Add('      "source_library": "' + EscapeJsonString(TempStr) + '",');
+                        
+                        // Footprint
+                        Try
+                            FootprintStr := Component.Footprint;
+                            If FootprintStr = '' Then
+                            Begin
+                                For I := 0 To Component.ParameterCount - 1 Do
+                                Begin
+                                    If I > 10 Then Break;  // Safety limit
+                                    Parameter := Component.SchParameters(I);
+                                    If (Parameter <> Nil) And (LowerCase(Parameter.Name) = 'footprint') Then
+                                    Begin
+                                        FootprintStr := Parameter.Text;
+                                        Break;
+                                    End;
+                                End;
+                            End;
+                        Except
+                            FootprintStr := '';
+                        End;
+                        OutputFile.Add('      "footprint": "' + EscapeJsonString(FootprintStr) + '",');
+                        
+                        // Location - cache coordinates and format once
+                        Try
+                            CompX := CoordToMM(Component.Location.X);
+                            CompY := CoordToMM(Component.Location.Y);
+                            TempStr := FormatFloat('0.00', CompX);
+                            OutputFile.Add('      "location": {');
+                            OutputFile.Add('        "x": ' + TempStr + ',');
+                            TempStr := FormatFloat('0.00', CompY);
+                            OutputFile.Add('        "y": ' + TempStr);
+                            OutputFile.Add('      },');
+                        Except
+                            OutputFile.Add('      "location": {"x": 0, "y": 0},');
+                        End;
+                        
+                        // Orientation
+                        Try
+                            OutputFile.Add('      "orientation": ' + IntToStr(Component.Orientation) + ',');
+                        Except
+                            OutputFile.Add('      "orientation": 0,');
+                        End;
+                        
+                        // Mirrored
+                        Try
+                            If Component.IsMirrored Then
+                                OutputFile.Add('      "mirrored": true,')
+                            Else
+                                OutputFile.Add('      "mirrored": false,');
+                        Except
+                            OutputFile.Add('      "mirrored": false,');
+                        End;
+                        
+                        // Pins
+                        OutputFile.Add('      "pins": [');
+                        PinFirst := True;
+                        Try
+                            PinIterator := Component.SchIterator_Create;
+                            If PinIterator <> Nil Then
+                            Begin
+                                Try
+                                    PinIterator.AddFilter_ObjectSet(MkSet(ePin));
+                                    Pin := PinIterator.FirstSchObject;
+                                    While Pin <> Nil Do
+                                    Begin
+                                        If Not PinFirst Then
+                                            OutputFile.Add(',');
+                                        PinFirst := False;
+                                        
+                                        OutputFile.Add('        {');
+                                        Try
+                                            OutputFile.Add('          "name": "' + EscapeJsonString(Pin.Name) + '",');
+                                            OutputFile.Add('          "designator": "' + EscapeJsonString(Pin.Designator) + '",');
+                                            If Pin.Net <> Nil Then
+                                                OutputFile.Add('          "net": "' + EscapeJsonString(Pin.Net.Name) + '"')
+                                            Else
+                                                OutputFile.Add('          "net": ""');
+                                        Except
+                                            OutputFile.Add('          "name": "",');
+                                            OutputFile.Add('          "designator": "",');
+                                            OutputFile.Add('          "net": ""');
+                                        End;
+                                        OutputFile.Add('        }');
+                                        
+                                        Pin := PinIterator.NextSchObject;
+                                    End;
+                                Finally
+                                    Component.SchIterator_Destroy(PinIterator);
+                                End;
+                            End;
+                        Except
+                        End;
+                        OutputFile.Add('      ],');
+                        
+                        // Parameters
+                        OutputFile.Add('      "parameters": [');
+                        PinFirst := True;
+                        Try
+                            For I := 0 To Component.ParameterCount - 1 Do
+                            Begin
+                                If I > 20 Then Break;  // Safety limit
+                                Parameter := Component.SchParameters(I);
+                                If Parameter <> Nil Then
+                                Begin
+                                    If Not PinFirst Then
+                                        OutputFile.Add(',');
+                                    PinFirst := False;
+                                    
+                                    OutputFile.Add('        {');
+                                    Try
+                                        OutputFile.Add('          "name": "' + EscapeJsonString(Parameter.Name) + '",');
+                                        OutputFile.Add('          "value": "' + EscapeJsonString(Parameter.Text) + '"');
+                                    Except
+                                        OutputFile.Add('          "name": "",');
+                                        OutputFile.Add('          "value": ""');
+                                    End;
+                                    OutputFile.Add('        }');
+                                End;
+                            End;
+                        Except
+                        End;
+                        OutputFile.Add('      ]');
+                        
+                        OutputFile.Add('    }');
+                        
+                        Component := Iterator.NextSchObject;
+                    End;
+                Finally
+                    CurrentSheet.SchIterator_Destroy(Iterator);
+                End;
+            End;
+        Except
+        End;
+        OutputFile.Add('  ],');
+        
+        // ========== WIRES ==========
+        OutputFile.Add('  "wires": [');
+        FirstItem := True;
+        BatchCounter := 0;
+        
+        Try
+            Iterator := CurrentSheet.SchIterator_Create;
+            If Iterator <> Nil Then
+            Begin
+                Try
+                    Iterator.AddFilter_ObjectSet(MkSet(eWire));
+                    
+                    Wire := Iterator.FirstSchObject;
+                    While (Wire <> Nil) And (WireCount < MAX_WIRES) Do
+                    Begin
+                        Inc(WireCount);
+                        Inc(BatchCounter);
+                        
+                        If BatchCounter >= BATCH_SIZE Then
+                        Begin
+                            BatchCounter := 0;
+                            Application.ProcessMessages;
+                            Sleep(5);  // Longer sleep for memory cleanup
+                        End;
+                        
+                        If Not FirstItem Then
+                            OutputFile.Add(',');
+                        FirstItem := False;
+                        
+                        OutputFile.Add('    {');
+                        
+                        // Vertices - cache coordinates
+                        OutputFile.Add('      "vertices": [');
+                        Try
+                            For I := 1 To Wire.VerticesCount Do
+                            Begin
+                                If I > 100 Then Break;  // Safety limit
+                                If I > 1 Then
+                                    OutputFile.Add(',');
+                                CompX := CoordToMM(Wire.Vertex(I).X);
+                                CompY := CoordToMM(Wire.Vertex(I).Y);
+                                TempStr := FormatFloat('0.00', CompX);
+                                OutputFile.Add('        {"x": ' + TempStr + ', "y": ' + FormatFloat('0.00', CompY) + '}');
+                            End;
+                        Except
+                        End;
+                        OutputFile.Add('      ],');
+                        
+                        // Net name
+                        Try
+                            If Wire.Net <> Nil Then
+                                OutputFile.Add('      "net": "' + EscapeJsonString(Wire.Net.Name) + '"')
+                            Else
+                                OutputFile.Add('      "net": ""');
+                        Except
+                            OutputFile.Add('      "net": ""');
+                        End;
+                        
+                        OutputFile.Add('    }');
+                        
+                        Wire := Iterator.NextSchObject;
+                    End;
+                Finally
+                    CurrentSheet.SchIterator_Destroy(Iterator);
+                End;
+            End;
+        Except
+        End;
+        OutputFile.Add('  ],');
+        
+        // ========== NET LABELS ==========
+        OutputFile.Add('  "net_labels": [');
+        FirstItem := True;
+        BatchCounter := 0;
+        
+        Try
+            Iterator := CurrentSheet.SchIterator_Create;
+            If Iterator <> Nil Then
+            Begin
+                Try
+                    Iterator.AddFilter_ObjectSet(MkSet(eNetLabel));
+                    
+                    NetLabel := Iterator.FirstSchObject;
+                    While (NetLabel <> Nil) And (NetLabelCount < MAX_NETLABELS) Do
+                    Begin
+                        Inc(NetLabelCount);
+                        Inc(BatchCounter);
+                        
+                        If BatchCounter >= BATCH_SIZE Then
+                        Begin
+                            BatchCounter := 0;
+                            Application.ProcessMessages;
+                            Sleep(5);  // Longer sleep for memory cleanup
+                        End;
+                        
+                        If Not FirstItem Then
+                            OutputFile.Add(',');
+                        FirstItem := False;
+                        
+                        OutputFile.Add('    {');
+                        
+                        Try
+                            OutputFile.Add('      "name": "' + EscapeJsonString(NetLabel.Text) + '",');
+                            CompX := CoordToMM(NetLabel.Location.X);
+                            CompY := CoordToMM(NetLabel.Location.Y);
+                            TempStr := FormatFloat('0.00', CompX);
+                            OutputFile.Add('      "location": {');
+                            OutputFile.Add('        "x": ' + TempStr + ',');
+                            TempStr := FormatFloat('0.00', CompY);
+                            OutputFile.Add('        "y": ' + TempStr);
+                            OutputFile.Add('      },');
+                            OutputFile.Add('      "orientation": ' + IntToStr(NetLabel.Orientation));
+                        Except
+                            OutputFile.Add('      "name": "",');
+                            OutputFile.Add('      "location": {"x": 0, "y": 0},');
+                            OutputFile.Add('      "orientation": 0');
+                        End;
+                        
+                        OutputFile.Add('    }');
+                        
+                        NetLabel := Iterator.NextSchObject;
+                    End;
+                Finally
+                    CurrentSheet.SchIterator_Destroy(Iterator);
+                End;
+            End;
+        Except
+        End;
+        OutputFile.Add('  ],');
+        
+        // ========== POWER PORTS ==========
+        OutputFile.Add('  "power_ports": [');
+        FirstItem := True;
+        BatchCounter := 0;
+        
+        Try
+            Iterator := CurrentSheet.SchIterator_Create;
+            If Iterator <> Nil Then
+            Begin
+                Try
+                    Iterator.AddFilter_ObjectSet(MkSet(ePowerObject));
+                    
+                    PowerPort := Iterator.FirstSchObject;
+                    While (PowerPort <> Nil) And (PowerCount < MAX_POWERPORTS) Do
+                    Begin
+                        Inc(PowerCount);
+                        Inc(BatchCounter);
+                        
+                        If BatchCounter >= BATCH_SIZE Then
+                        Begin
+                            BatchCounter := 0;
+                            Application.ProcessMessages;
+                            Sleep(5);  // Longer sleep for memory cleanup
+                        End;
+                        
+                        If Not FirstItem Then
+                            OutputFile.Add(',');
+                        FirstItem := False;
+                        
+                        OutputFile.Add('    {');
+                        
+                        Try
+                            OutputFile.Add('      "name": "' + EscapeJsonString(PowerPort.Text) + '",');
+                            OutputFile.Add('      "style": "' + EscapeJsonString(PowerPort.Style) + '",');
+                            CompX := CoordToMM(PowerPort.Location.X);
+                            CompY := CoordToMM(PowerPort.Location.Y);
+                            TempStr := FormatFloat('0.00', CompX);
+                            OutputFile.Add('      "location": {');
+                            OutputFile.Add('        "x": ' + TempStr + ',');
+                            TempStr := FormatFloat('0.00', CompY);
+                            OutputFile.Add('        "y": ' + TempStr);
+                            OutputFile.Add('      },');
+                            If PowerPort.Net <> Nil Then
+                                OutputFile.Add('      "net": "' + EscapeJsonString(PowerPort.Net.Name) + '"')
+                            Else
+                                OutputFile.Add('      "net": "' + EscapeJsonString(PowerPort.Text) + '"');
+                        Except
+                            OutputFile.Add('      "name": "",');
+                            OutputFile.Add('      "style": "",');
+                            OutputFile.Add('      "location": {"x": 0, "y": 0},');
+                            OutputFile.Add('      "net": ""');
+                        End;
+                        
+                        OutputFile.Add('    }');
+                        
+                        PowerPort := Iterator.NextSchObject;
+                    End;
+                Finally
+                    CurrentSheet.SchIterator_Destroy(Iterator);
+                End;
+            End;
+        Except
+        End;
+        OutputFile.Add('  ],');
+        
+        // ========== PORTS ==========
+        OutputFile.Add('  "ports": [');
+        FirstItem := True;
+        BatchCounter := 0;
+        
+        Try
+            Iterator := CurrentSheet.SchIterator_Create;
+            If Iterator <> Nil Then
+            Begin
+                Try
+                    Iterator.AddFilter_ObjectSet(MkSet(ePort));
+                    
+                    Port := Iterator.FirstSchObject;
+                    While (Port <> Nil) And (PortCount < MAX_PORTS) Do
+                    Begin
+                        Inc(PortCount);
+                        Inc(BatchCounter);
+                        
+                        If BatchCounter >= BATCH_SIZE Then
+                        Begin
+                            BatchCounter := 0;
+                            Application.ProcessMessages;
+                            Sleep(5);  // Longer sleep for memory cleanup
+                        End;
+                        
+                        If Not FirstItem Then
+                            OutputFile.Add(',');
+                        FirstItem := False;
+                        
+                        OutputFile.Add('    {');
+                        
+                        Try
+                            OutputFile.Add('      "name": "' + EscapeJsonString(Port.Name) + '",');
+                            OutputFile.Add('      "io_type": "' + EscapeJsonString(Port.IOType) + '",');
+                            CompX := CoordToMM(Port.Location.X);
+                            CompY := CoordToMM(Port.Location.Y);
+                            TempStr := FormatFloat('0.00', CompX);
+                            OutputFile.Add('      "location": {');
+                            OutputFile.Add('        "x": ' + TempStr + ',');
+                            TempStr := FormatFloat('0.00', CompY);
+                            OutputFile.Add('        "y": ' + TempStr);
+                            OutputFile.Add('      }');
+                        Except
+                            OutputFile.Add('      "name": "",');
+                            OutputFile.Add('      "io_type": "",');
+                            OutputFile.Add('      "location": {"x": 0, "y": 0}');
+                        End;
+                        
+                        OutputFile.Add('    }');
+                        
+                        Port := Iterator.NextSchObject;
+                    End;
+                Finally
+                    CurrentSheet.SchIterator_Destroy(Iterator);
+                End;
+            End;
+        Except
+        End;
+        OutputFile.Add('  ],');
+        
+        // Statistics
+        OutputFile.Add('  "statistics": {');
+        OutputFile.Add('    "component_count": ' + IntToStr(CompCount) + ',');
+        OutputFile.Add('    "wire_count": ' + IntToStr(WireCount) + ',');
+        OutputFile.Add('    "net_label_count": ' + IntToStr(NetLabelCount) + ',');
+        OutputFile.Add('    "power_port_count": ' + IntToStr(PowerCount) + ',');
+        OutputFile.Add('    "port_count": ' + IntToStr(PortCount));
+        OutputFile.Add('  },');
+        
+        OutputFile.Add('  "status": "active"');
+        OutputFile.Add('}');
+        
+        // Save to file
+        FileName := BASE_PATH + 'schematic_info.json';
+        Try
             OutputFile.SaveToFile(FileName);
-            ShowMessage('SUCCESS! Schematic information exported to:' + #13#10 + FileName + #13#10 + #13#10 +
-                        'Components: ' + IntToStr(CompCount) + #13#10 +
-                        'Wires: ' + IntToStr(WireCount) + #13#10 +
-                        'Net Labels: ' + IntToStr(NetLabelCount) + #13#10 +
-                        'Power Ports: ' + IntToStr(PowerCount) + #13#10 +
-                        'Ports: ' + IntToStr(PortCount));
         Except
             ShowMessage('ERROR: Could not save file to:' + #13#10 + FileName);
+            OutputFile.Free;
+            Exit;
         End;
+        
+        // Show success message
+        ShowMessage('SUCCESS! Schematic information exported to:' + #13#10 + FileName + #13#10 + #13#10 +
+                    'Components: ' + IntToStr(CompCount) + #13#10 +
+                    'Wires: ' + IntToStr(WireCount) + #13#10 +
+                    'Net Labels: ' + IntToStr(NetLabelCount) + #13#10 +
+                    'Power Ports: ' + IntToStr(PowerCount) + #13#10 +
+                    'Ports: ' + IntToStr(PortCount));
     Finally
         OutputFile.Free;
     End;

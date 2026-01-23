@@ -5,8 +5,8 @@
  *}
 
 Const
-    OUTPUT_BASE_PATH = 'E:\Workspace\AI\11.10.WayNe\new-version\Output';
-    BASE_PATH = 'E:\Workspace\AI\11.10.WayNe\new-version\';
+    OUTPUT_BASE_PATH = 'D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent\Output';
+    BASE_PATH = 'D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent\';
 
 // Helper function to escape JSON strings
 Function EscapeJsonString(InputStr: String): String;

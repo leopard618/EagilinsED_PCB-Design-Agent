@@ -2,10 +2,13 @@
  * Check Connectivity Command
  * Checks connectivity and exports results
  * Command: check_connectivity
+ * OPTIMIZED: Direct TStringList writing, removed JSONStr concatenation, limits
  *}
 
 Const
-    BASE_PATH = 'E:\Workspace\AI\11.10.WayNe\new-version\';
+    BASE_PATH = 'D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent\';
+    MAX_NETS = 5000;      // Safety limit
+    BATCH_SIZE = 100;     // Process in batches
 
 // Helper function to escape JSON strings
 Function EscapeJsonString(InputStr: String): String;
@@ -15,6 +18,8 @@ Var
     Ch: Char;
 Begin
     ResultStr := '';
+    If Length(InputStr) > 500 Then
+        InputStr := Copy(InputStr, 1, 500);  // Limit string length
     For I := 1 To Length(InputStr) Do
     Begin
         Ch := InputStr[I];
@@ -46,12 +51,12 @@ Var
     Iterator      : IPCB_BoardIterator;
     OutputFile    : TStringList;
     FileName      : String;
-    JSONStr       : String;
     TotalNets     : Integer;
     RoutedNets    : Integer;
     UnroutedNets  : Integer;
     FirstItem     : Boolean;
     HasConnections: Boolean;
+    BatchCounter  : Integer;
 Begin
     // Get workspace
     Try
@@ -89,90 +94,100 @@ Begin
     TotalNets := 0;
     RoutedNets := 0;
     UnroutedNets := 0;
+    BatchCounter := 0;
     
-    // Build JSON
-    JSONStr := '{' + #13#10;
-    JSONStr := JSONStr + '  "check_type": "Connectivity",' + #13#10;
-    
-    Try
-        JSONStr := JSONStr + '  "pcb_file": "' + EscapeJsonString(PCB.FileName) + '",' + #13#10;
-    Except
-        JSONStr := JSONStr + '  "pcb_file": "Unknown",' + #13#10;
-    End;
-    
-    // Unrouted nets
-    JSONStr := JSONStr + '  "unrouted_nets": [' + #13#10;
-    FirstItem := True;
-    
-    Try
-        Iterator := PCB.BoardIterator_Create;
-        If Iterator <> Nil Then
-        Begin
-            Try
-                Iterator.AddFilter_ObjectSet(MkSet(eNetObject));
-                Iterator.AddFilter_LayerSet(AllLayers);
-                Iterator.AddFilter_Method(eProcessAll);
-                
-                Net := Iterator.FirstPCBObject;
-                While Net <> Nil Do
-                Begin
-                    Inc(TotalNets);
-                    
-                    // Check if net has routing
-                    HasConnections := (Net.TrackCount > 0) Or (Net.ViaCount > 0);
-                    
-                    If HasConnections Then
-                        Inc(RoutedNets)
-                    Else
-                    Begin
-                        Inc(UnroutedNets);
-                        
-                        If Not FirstItem Then
-                            JSONStr := JSONStr + ',' + #13#10;
-                        FirstItem := False;
-                        
-                        Try
-                            JSONStr := JSONStr + '    "' + EscapeJsonString(Net.Name) + '"';
-                        Except
-                            JSONStr := JSONStr + '    "Unknown"';
-                        End;
-                    End;
-                    
-                    Net := Iterator.NextPCBObject;
-                End;
-            Finally
-                PCB.BoardIterator_Destroy(Iterator);
-            End;
-        End;
-    Except
-    End;
-    JSONStr := JSONStr + #13#10 + '  ],' + #13#10;
-    
-    // Summary
-    JSONStr := JSONStr + '  "summary": {' + #13#10;
-    JSONStr := JSONStr + '    "total_nets": ' + IntToStr(TotalNets) + ',' + #13#10;
-    JSONStr := JSONStr + '    "routed_nets": ' + IntToStr(RoutedNets) + ',' + #13#10;
-    JSONStr := JSONStr + '    "unrouted_nets": ' + IntToStr(UnroutedNets) + ',' + #13#10;
-    If TotalNets > 0 Then
-        JSONStr := JSONStr + '    "routing_completion": ' + FormatFloat('0.0', (RoutedNets / TotalNets) * 100) + #13#10
-    Else
-        JSONStr := JSONStr + '    "routing_completion": 0' + #13#10;
-    JSONStr := JSONStr + '  },' + #13#10;
-    
-    // Status
-    If UnroutedNets = 0 Then
-        JSONStr := JSONStr + '  "status": "COMPLETE"' + #13#10
-    Else
-        JSONStr := JSONStr + '  "status": "INCOMPLETE"' + #13#10;
-    
-    JSONStr := JSONStr + '}';
-    
-    // Write to file
+    // Create output file
     OutputFile := TStringList.Create;
     Try
-        OutputFile.Text := JSONStr;
-        FileName := BASE_PATH + 'connectivity_report.json';
+        // Start JSON
+        OutputFile.Add('{');
+        OutputFile.Add('  "check_type": "Connectivity",');
         
+        Try
+            OutputFile.Add('  "pcb_file": "' + EscapeJsonString(PCB.FileName) + '",');
+        Except
+            OutputFile.Add('  "pcb_file": "Unknown",');
+        End;
+        
+        // Unrouted nets
+        OutputFile.Add('  "unrouted_nets": [');
+        FirstItem := True;
+        
+        Try
+            Iterator := PCB.BoardIterator_Create;
+            If Iterator <> Nil Then
+            Begin
+                Try
+                    Iterator.AddFilter_ObjectSet(MkSet(eNetObject));
+                    Iterator.AddFilter_LayerSet(AllLayers);
+                    Iterator.AddFilter_Method(eProcessAll);
+                    
+                    Net := Iterator.FirstPCBObject;
+                    While (Net <> Nil) And (TotalNets < MAX_NETS) Do
+                    Begin
+                        Inc(TotalNets);
+                        Inc(BatchCounter);
+                        
+                        // UI refresh every BATCH_SIZE items
+                        If BatchCounter >= BATCH_SIZE Then
+                        Begin
+                            BatchCounter := 0;
+                            Application.ProcessMessages;
+                            Sleep(1);
+                        End;
+                        
+                        // Check if net has routing
+                        HasConnections := (Net.TrackCount > 0) Or (Net.ViaCount > 0);
+                        
+                        If HasConnections Then
+                            Inc(RoutedNets)
+                        Else
+                        Begin
+                            Inc(UnroutedNets);
+                            
+                            If Not FirstItem Then
+                                OutputFile.Add(',');
+                            FirstItem := False;
+                            
+                            Try
+                                OutputFile.Add('    "' + EscapeJsonString(Net.Name) + '"');
+                            Except
+                                OutputFile.Add('    "Unknown"');
+                            End;
+                        End;
+                        
+                        Net := Iterator.NextPCBObject;
+                    End;
+                Finally
+                    PCB.BoardIterator_Destroy(Iterator);
+                End;
+            End;
+        Except
+        End;
+        
+        OutputFile.Add('  ],');
+        
+        // Summary
+        OutputFile.Add('  "summary": {');
+        OutputFile.Add('    "total_nets": ' + IntToStr(TotalNets) + ',');
+        OutputFile.Add('    "routed_nets": ' + IntToStr(RoutedNets) + ',');
+        OutputFile.Add('    "unrouted_nets": ' + IntToStr(UnroutedNets) + ',');
+        If TotalNets > 0 Then
+            OutputFile.Add('    "routing_completion": ' + FormatFloat('0.0', (RoutedNets / TotalNets) * 100))
+        Else
+            OutputFile.Add('    "routing_completion": 0');
+        OutputFile.Add('  },');
+        
+        // Status
+        If UnroutedNets = 0 Then
+            OutputFile.Add('  "status": "COMPLETE"')
+        Else
+            OutputFile.Add('  "status": "INCOMPLETE"');
+        
+        OutputFile.Add('}');
+        
+        // Save to file
+        FileName := BASE_PATH + 'connectivity_report.json';
         Try
             OutputFile.SaveToFile(FileName);
             If UnroutedNets = 0 Then

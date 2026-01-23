@@ -5,7 +5,7 @@
  *}
 
 Const
-    BASE_PATH = 'E:\Workspace\AI\11.10.WayNe\new-version\';
+    BASE_PATH = 'D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent\';
 
 // Helper function to extract JSON string value
 Function ExtractJsonString(JsonContent: String; KeyName: String): String;

@@ -1,6 +1,7 @@
 """
-File-Based MCP Server for Altium Designer
+File-Based MCP Server for Altium Designer with File Watcher
 Uses Altium scripts to export data to JSON files
+Automatically detects file changes using file watcher
 This works when COM interface is not available
 
 Supports:
@@ -9,6 +10,12 @@ Supports:
 - Project information (project_info.json)
 - Verification reports (verification_report.json)
 - Output results (output_result.json)
+- Design rules (design_rules.json)
+
+Features:
+- File watcher automatically detects JSON file changes
+- Caches file data for fast access
+- Auto-reloads when files are updated
 """
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
@@ -16,14 +23,67 @@ from urllib.parse import urlparse
 import sys
 import os
 import time
+import threading
 from pathlib import Path
+
+# Try to import watchdog for file watching
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    WATCHDOG_AVAILABLE = True
+except ImportError:
+    WATCHDOG_AVAILABLE = False
+    print("WARNING: watchdog not installed. File watching disabled.")
+    print("Install with: pip install watchdog")
+
+
+class JSONFileHandler(FileSystemEventHandler):
+    """File system event handler for JSON files"""
+    
+    def __init__(self, mcp_handler):
+        self.mcp_handler = mcp_handler
+        self.watched_files = [
+            'pcb_info.json',
+            'design_rules.json',
+            'schematic_info.json',
+            'project_info.json',
+            'verification_report.json',
+            'connectivity_report.json',
+            'output_result.json',
+            'pcb_commands.json',
+            'schematic_commands.json',
+            'board_config.json',
+            'component_search.json',
+            'library_list.json'
+        ]
+    
+    def on_modified(self, event):
+        """Called when a file is modified"""
+        if not event.is_directory:
+            filename = os.path.basename(event.src_path)
+            if filename in self.watched_files:
+                print(f"[Watcher] {filename} modified - reloading...")
+                self.mcp_handler.reload_file(filename)
+    
+    def on_created(self, event):
+        """Called when a file is created"""
+        if not event.is_directory:
+            filename = os.path.basename(event.src_path)
+            if filename in self.watched_files:
+                print(f"[Watcher] {filename} created - loading...")
+                self.mcp_handler.reload_file(filename)
 
 
 class AltiumMCPHandler(BaseHTTPRequestHandler):
     """File-based MCP handler - reads data from JSON files exported by Altium scripts"""
     
     # Base directory for all data files
-    BASE_DIR = r"E:\Workspace\AI\11.10.WayNe\new-version"
+    BASE_DIR = r"D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent"
+    
+    # Class-level cache (shared across all handler instances)
+    _file_cache = {}
+    _cache_timestamps = {}
+    _cache_lock = threading.Lock()
     
     def __init__(self, *args, **kwargs):
         # Default location for data files
@@ -44,7 +104,119 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
         self.component_search_path = os.path.join(self.BASE_DIR, "component_search.json")
         self.library_list_path = os.path.join(self.BASE_DIR, "library_list.json")
         
+        # Initialize cache for all files
+        self._initialize_cache()
+        
         super().__init__(*args, **kwargs)
+    
+    def _initialize_cache(self):
+        """Initialize cache for all watched files"""
+        files_to_cache = {
+            'pcb_info.json': self.pcb_info_path,
+            'design_rules.json': self.design_rules_path,
+            'schematic_info.json': self.schematic_info_path,
+            'project_info.json': self.project_info_path,
+            'verification_report.json': self.verification_report_path,
+            'connectivity_report.json': self.connectivity_report_path,
+            'output_result.json': self.output_result_path,
+            'pcb_commands.json': self.commands_path,
+            'schematic_commands.json': self.schematic_commands_path,
+            'board_config.json': self.board_config_path,
+            'component_search.json': self.component_search_path,
+            'library_list.json': self.library_list_path,
+        }
+        
+        with self._cache_lock:
+            for filename, filepath in files_to_cache.items():
+                if os.path.exists(filepath):
+                    try:
+                        data = self.get_json_from_file(filepath)
+                        if data is not None:
+                            self._file_cache[filename] = data
+                            self._cache_timestamps[filename] = os.path.getmtime(filepath)
+                    except Exception as e:
+                        print(f"[Cache] Failed to initialize {filename}: {e}")
+    
+    def reload_file(self, filename):
+        """Reload a file when watcher detects change"""
+        file_mapping = {
+            'pcb_info.json': self.pcb_info_path,
+            'design_rules.json': self.design_rules_path,
+            'schematic_info.json': self.schematic_info_path,
+            'project_info.json': self.project_info_path,
+            'verification_report.json': self.verification_report_path,
+            'connectivity_report.json': self.connectivity_report_path,
+            'output_result.json': self.output_result_path,
+            'pcb_commands.json': self.commands_path,
+            'schematic_commands.json': self.schematic_commands_path,
+            'board_config.json': self.board_config_path,
+            'component_search.json': self.component_search_path,
+            'library_list.json': self.library_list_path,
+        }
+        
+        filepath = file_mapping.get(filename)
+        if not filepath:
+            return
+        
+        # Wait a bit for file to be fully written
+        time.sleep(0.1)
+        
+        try:
+            data = self.get_json_from_file(filepath)
+            if data is not None:
+                with self._cache_lock:
+                    self._file_cache[filename] = data
+                    self._cache_timestamps[filename] = os.path.getmtime(filepath)
+                print(f"[Cache] {filename} reloaded successfully")
+            else:
+                print(f"[Cache] {filename} reload failed - invalid data")
+        except Exception as e:
+            print(f"[Cache] Error reloading {filename}: {e}")
+    
+    def get_cached_json(self, filename):
+        """Get JSON data from cache if available and up-to-date"""
+        with self._cache_lock:
+            if filename in self._file_cache:
+                file_mapping = {
+                    'pcb_info.json': self.pcb_info_path,
+                    'design_rules.json': self.design_rules_path,
+                    'schematic_info.json': self.schematic_info_path,
+                    'project_info.json': self.project_info_path,
+                    'verification_report.json': self.verification_report_path,
+                    'connectivity_report.json': self.connectivity_report_path,
+                    'output_result.json': self.output_result_path,
+                    'pcb_commands.json': self.commands_path,
+                    'schematic_commands.json': self.schematic_commands_path,
+                    'board_config.json': self.board_config_path,
+                    'component_search.json': self.component_search_path,
+                    'library_list.json': self.library_list_path,
+                }
+                
+                filepath = file_mapping.get(filename)
+                if filepath and os.path.exists(filepath):
+                    # Check if file was modified since cache
+                    current_mtime = os.path.getmtime(filepath)
+                    cached_mtime = self._cache_timestamps.get(filename, 0)
+                    
+                    if current_mtime <= cached_mtime:
+                        # Cache is up-to-date
+                        return self._file_cache[filename]
+                    else:
+                        # File was modified, reload
+                        print(f"[Cache] {filename} modified, reloading...")
+                        try:
+                            data = self.get_json_from_file(filepath)
+                            if data is not None:
+                                self._file_cache[filename] = data
+                                self._cache_timestamps[filename] = current_mtime
+                                return data
+                        except Exception as e:
+                            print(f"[Cache] Error reloading {filename}: {e}")
+                            # Return stale cache if reload fails
+                            return self._file_cache.get(filename)
+        
+        # Cache miss or error - read from file
+        return None
     
     def repair_json_syntax(self, content: str) -> str:
         """
@@ -110,7 +282,13 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
             return None
     
     def get_pcb_info_from_file(self):
-        """Read PCB info from JSON file exported by Altium script"""
+        """Read PCB info from JSON file exported by Altium script (uses cache if available)"""
+        # Try cache first
+        cached = self.get_cached_json('pcb_info.json')
+        if cached is not None:
+            return cached
+        
+        # Fallback to direct file read
         if not os.path.exists(self.pcb_info_path):
             return None
         
@@ -244,7 +422,10 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
                 }, 404)
         
         elif path == "/altium/schematic/info":
-            info = self.get_json_from_file(self.schematic_info_path)
+            # Try cache first
+            info = self.get_cached_json('schematic_info.json')
+            if info is None:
+                info = self.get_json_from_file(self.schematic_info_path)
             
             if info:
                 self._send_json_response(info)
@@ -258,7 +439,10 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
                 }, 404)
         
         elif path == "/altium/project/info":
-            info = self.get_json_from_file(self.project_info_path)
+            # Try cache first
+            info = self.get_cached_json('project_info.json')
+            if info is None:
+                info = self.get_json_from_file(self.project_info_path)
             
             if info:
                 self._send_json_response(info)
@@ -299,7 +483,10 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
                 }, 404)
         
         elif path == "/altium/design/rules":
-            info = self.get_json_from_file(self.design_rules_path)
+            # Try cache first
+            info = self.get_cached_json('design_rules.json')
+            if info is None:
+                info = self.get_json_from_file(self.design_rules_path)
             
             if info:
                 self._send_json_response(info)
@@ -587,25 +774,68 @@ class AltiumMCPHandler(BaseHTTPRequestHandler):
         print(f"[MCP Server] {format % args}")
 
 
-def run_server(port=8080, pcb_info_path=None):
-    """Run the file-based MCP server"""
+def run_server(port=8080, pcb_info_path=None, enable_watcher=True):
+    """Run the file-based MCP server with optional file watcher"""
     server_address = ("", port)
+    
+    # Create handler instance to initialize cache
+    handler_instance = AltiumMCPHandler.__new__(AltiumMCPHandler)
+    handler_instance.pcb_info_path = pcb_info_path or os.path.join(AltiumMCPHandler.BASE_DIR, "pcb_info.json")
+    handler_instance.schematic_info_path = os.path.join(AltiumMCPHandler.BASE_DIR, "schematic_info.json")
+    handler_instance.project_info_path = os.path.join(AltiumMCPHandler.BASE_DIR, "project_info.json")
+    handler_instance.verification_report_path = os.path.join(AltiumMCPHandler.BASE_DIR, "verification_report.json")
+    handler_instance.connectivity_report_path = os.path.join(AltiumMCPHandler.BASE_DIR, "connectivity_report.json")
+    handler_instance.output_result_path = os.path.join(AltiumMCPHandler.BASE_DIR, "output_result.json")
+    handler_instance.commands_path = os.path.join(AltiumMCPHandler.BASE_DIR, "pcb_commands.json")
+    handler_instance.schematic_commands_path = os.path.join(AltiumMCPHandler.BASE_DIR, "schematic_commands.json")
+    handler_instance.design_rules_path = os.path.join(AltiumMCPHandler.BASE_DIR, "design_rules.json")
+    handler_instance.board_config_path = os.path.join(AltiumMCPHandler.BASE_DIR, "board_config.json")
+    handler_instance.component_search_path = os.path.join(AltiumMCPHandler.BASE_DIR, "component_search.json")
+    handler_instance.library_list_path = os.path.join(AltiumMCPHandler.BASE_DIR, "library_list.json")
+    handler_instance._initialize_cache()
     
     handler_class = lambda *args, **kwargs: AltiumMCPHandler(*args, pcb_info_path=pcb_info_path, **kwargs)
     httpd = HTTPServer(server_address, handler_class)
     
+    # Start file watcher if available and enabled
+    observer = None
+    if enable_watcher and WATCHDOG_AVAILABLE:
+        try:
+            observer = Observer()
+            event_handler = JSONFileHandler(handler_instance)
+            observer.schedule(event_handler, AltiumMCPHandler.BASE_DIR, recursive=False)
+            observer.start()
+            print("[Watcher] File watcher started - monitoring JSON files")
+        except Exception as e:
+            print(f"[Watcher] Failed to start file watcher: {e}")
+            observer = None
+    
     print("=" * 60)
     print("Altium Designer MCP Server (File-Based)")
+    if enable_watcher and WATCHDOG_AVAILABLE and observer:
+        print("  [WITH FILE WATCHER - Auto-detects changes]")
     print("=" * 60)
     print(f"Server running on http://localhost:{port}")
     print(f"PCB Info File: {pcb_info_path or 'Auto-detect'}")
     print("")
-    print("IMPORTANT: This server uses file-based communication.")
-    print("You must run the Altium script to export PCB info:")
-    print("  1. In Altium Designer: DXP -> Run Script")
-    print("  2. Select: altium_export_pcb_info.pas")
-    print("  3. The script will create pcb_info.json")
-    print("")
+    if enable_watcher and WATCHDOG_AVAILABLE and observer:
+        print("FILE WATCHER ENABLED:")
+        print("  - Automatically detects JSON file changes")
+        print("  - Auto-reloads when Altium exports data")
+        print("  - No manual refresh needed!")
+        print("")
+        print("To use auto-export:")
+        print("  1. Set up auto-export script in Altium (see auto_export.pas)")
+        print("  2. Save your document - export happens automatically")
+        print("  3. File watcher detects change and updates cache")
+        print("")
+    else:
+        print("IMPORTANT: This server uses file-based communication.")
+        print("You must run the Altium script to export PCB info:")
+        print("  1. In Altium Designer: DXP -> Run Script")
+        print("  2. Select: workflows/export_all.pas")
+        print("  3. The script will create JSON files")
+        print("")
     print("Press Ctrl+C to stop")
     print("=" * 60)
     
@@ -613,14 +843,18 @@ def run_server(port=8080, pcb_info_path=None):
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down server...")
+        if observer:
+            observer.stop()
+            observer.join()
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description='File-based MCP server for Altium Designer')
+    parser = argparse.ArgumentParser(description='File-based MCP server for Altium Designer with file watcher')
     parser.add_argument('--port', type=int, default=8080, help='Server port')
     parser.add_argument('--info-file', type=str, help='Path to pcb_info.json file')
+    parser.add_argument('--no-watcher', action='store_true', help='Disable file watcher')
     args = parser.parse_args()
     
-    run_server(args.port, args.info_file)
+    run_server(args.port, args.info_file, enable_watcher=not args.no_watcher)
 

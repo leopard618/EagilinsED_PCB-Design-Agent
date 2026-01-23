@@ -2,10 +2,11 @@
  * Run ERC Command
  * Runs Electrical Rule Check and exports results
  * Command: run_erc
+ * OPTIMIZED: Direct TStringList writing, removed JSONStr concatenation
  *}
 
 Const
-    BASE_PATH = 'E:\Workspace\AI\11.10.WayNe\new-version\';
+    BASE_PATH = 'D:\Work\workspace\Wayne\EagilinsED_PCB-Design-Agent\';
 
 // Helper function to escape JSON strings
 Function EscapeJsonString(InputStr: String): String;
@@ -15,6 +16,8 @@ Var
     Ch: Char;
 Begin
     ResultStr := '';
+    If Length(InputStr) > 500 Then
+        InputStr := Copy(InputStr, 1, 500);  // Limit string length
     For I := 1 To Length(InputStr) Do
     Begin
         Ch := InputStr[I];
@@ -45,7 +48,6 @@ Var
     Doc           : IDocument;
     OutputFile    : TStringList;
     FileName      : String;
-    JSONStr       : String;
     ViolationCount: Integer;
     ErrorCount    : Integer;
     WarningCount  : Integer;
@@ -102,51 +104,50 @@ Begin
     ErrorCount := 0;
     WarningCount := 0;
     
-    // Build JSON
-    JSONStr := '{' + #13#10;
-    JSONStr := JSONStr + '  "verification_type": "ERC",' + #13#10;
-    
-    Try
-        JSONStr := JSONStr + '  "schematic_file": "' + EscapeJsonString(CurrentSheet.DocumentName) + '",' + #13#10;
-    Except
-        JSONStr := JSONStr + '  "schematic_file": "Unknown",' + #13#10;
-    End;
-    
-    // Try to get error count from project
-    Try
-        Project := Workspace.DM_FocusedProject;
-        If Project <> Nil Then
-        Begin
-            ErrorCount := Project.DM_ErrorCount;
-            WarningCount := Project.DM_WarningCount;
-            ViolationCount := ErrorCount + WarningCount;
-        End;
-    Except
-    End;
-    
-    JSONStr := JSONStr + '  "violations": [],' + #13#10;
-    
-    // Summary
-    JSONStr := JSONStr + '  "summary": {' + #13#10;
-    JSONStr := JSONStr + '    "total_violations": ' + IntToStr(ViolationCount) + ',' + #13#10;
-    JSONStr := JSONStr + '    "errors": ' + IntToStr(ErrorCount) + ',' + #13#10;
-    JSONStr := JSONStr + '    "warnings": ' + IntToStr(WarningCount) + #13#10;
-    JSONStr := JSONStr + '  },' + #13#10;
-    
-    // Pass/Fail status
-    If ErrorCount = 0 Then
-        JSONStr := JSONStr + '  "status": "PASS"' + #13#10
-    Else
-        JSONStr := JSONStr + '  "status": "FAIL"' + #13#10;
-    
-    JSONStr := JSONStr + '}';
-    
-    // Write to file
+    // Create output file
     OutputFile := TStringList.Create;
     Try
-        OutputFile.Text := JSONStr;
-        FileName := BASE_PATH + 'verification_report.json';
+        // Start JSON
+        OutputFile.Add('{');
+        OutputFile.Add('  "verification_type": "ERC",');
         
+        Try
+            OutputFile.Add('  "schematic_file": "' + EscapeJsonString(CurrentSheet.DocumentName) + '",');
+        Except
+            OutputFile.Add('  "schematic_file": "Unknown",');
+        End;
+        
+        // Try to get error count from project
+        Try
+            Project := Workspace.DM_FocusedProject;
+            If Project <> Nil Then
+            Begin
+                ErrorCount := Project.DM_ErrorCount;
+                WarningCount := Project.DM_WarningCount;
+                ViolationCount := ErrorCount + WarningCount;
+            End;
+        Except
+        End;
+        
+        OutputFile.Add('  "violations": [],');
+        
+        // Summary
+        OutputFile.Add('  "summary": {');
+        OutputFile.Add('    "total_violations": ' + IntToStr(ViolationCount) + ',');
+        OutputFile.Add('    "errors": ' + IntToStr(ErrorCount) + ',');
+        OutputFile.Add('    "warnings": ' + IntToStr(WarningCount));
+        OutputFile.Add('  },');
+        
+        // Pass/Fail status
+        If ErrorCount = 0 Then
+            OutputFile.Add('  "status": "PASS"')
+        Else
+            OutputFile.Add('  "status": "FAIL"');
+        
+        OutputFile.Add('}');
+        
+        // Save to file
+        FileName := BASE_PATH + 'verification_report.json';
         Try
             OutputFile.SaveToFile(FileName);
             If ErrorCount = 0 Then
