@@ -98,6 +98,9 @@ class AltiumMCPServer:
             
             stats = raw_data.get('statistics', {})
             
+            # Auto-analyze on load
+            analysis = self._auto_analyze_pcb(gir, stats)
+            
             return {
                 "success": True,
                 "file": Path(pcb_path).name,
@@ -105,10 +108,117 @@ class AltiumMCPServer:
                 "version": board.version,
                 "layers": len(gir.board.layers),
                 "statistics": stats,
+                "analysis": analysis,
                 "message": f"PCB loaded: {Path(pcb_path).name}"
             }
         except Exception as e:
             return {"error": str(e)}
+    
+    def _auto_analyze_pcb(self, gir, stats: dict) -> dict:
+        """Automatically analyze PCB and generate intelligent recommendations"""
+        issues = []
+        recommendations = []
+        
+        # 1. Check for unrouted power nets
+        power_nets = []
+        signal_nets = []
+        ground_nets = []
+        
+        for net in gir.nets:
+            net_name = net.name.upper()
+            if any(p in net_name for p in ['GND', 'GROUND', 'VSS', 'AGND', 'DGND']):
+                ground_nets.append(net)
+            elif any(p in net_name for p in ['VCC', 'VDD', '+', 'PWR', 'POWER', 'VIN']):
+                power_nets.append(net)
+            else:
+                signal_nets.append(net)
+        
+        # Check which nets have tracks
+        connected_nets = {track.net_id for track in gir.tracks}
+        
+        # Find unrouted power nets (critical issues)
+        unrouted_power = [n for n in power_nets if n.id not in connected_nets]
+        for net in unrouted_power:
+            issues.append({
+                "severity": "error",
+                "type": "unrouted_power",
+                "message": f"Power net '{net.name}' has no routing",
+                "net": net.name
+            })
+            recommendations.append({
+                "priority": "high",
+                "action": "route_power",
+                "description": f"Route power net '{net.name}' with wide traces (0.5mm+)",
+                "net": net.name,
+                "suggested_width_mm": 0.5,
+                "suggested_layer": "Top"
+            })
+        
+        # Find unrouted ground nets (critical)
+        unrouted_ground = [n for n in ground_nets if n.id not in connected_nets]
+        for net in unrouted_ground:
+            issues.append({
+                "severity": "error", 
+                "type": "unrouted_ground",
+                "message": f"Ground net '{net.name}' has no routing - consider ground plane",
+                "net": net.name
+            })
+            recommendations.append({
+                "priority": "high",
+                "action": "add_ground_plane",
+                "description": f"Add ground plane for '{net.name}' on internal layer",
+                "net": net.name,
+                "suggested_layer": "GND (L2)"
+            })
+        
+        # Find unrouted signal nets (warnings)
+        unrouted_signals = [n for n in signal_nets if n.id not in connected_nets][:10]  # Limit
+        for net in unrouted_signals:
+            issues.append({
+                "severity": "warning",
+                "type": "unrouted_signal",
+                "message": f"Signal net '{net.name}' needs routing",
+                "net": net.name
+            })
+        
+        if unrouted_signals:
+            recommendations.append({
+                "priority": "medium",
+                "action": "route_signals",
+                "description": f"Route {len(unrouted_signals)} signal nets with standard width",
+                "count": len(unrouted_signals),
+                "suggested_width_mm": 0.25
+            })
+        
+        # 2. Check component count for complexity assessment
+        component_count = len(gir.footprints)
+        if component_count > 100:
+            recommendations.append({
+                "priority": "info",
+                "action": "review_placement",
+                "description": f"Complex board with {component_count} components - consider reviewing placement for optimal routing"
+            })
+        
+        # 3. Summary
+        error_count = len([i for i in issues if i["severity"] == "error"])
+        warning_count = len([i for i in issues if i["severity"] == "warning"])
+        
+        return {
+            "summary": {
+                "total_issues": len(issues),
+                "errors": error_count,
+                "warnings": warning_count,
+                "power_nets": len(power_nets),
+                "ground_nets": len(ground_nets),
+                "signal_nets": len(signal_nets),
+                "unrouted_power": len(unrouted_power),
+                "unrouted_ground": len(unrouted_ground),
+                "unrouted_signals": len(unrouted_signals)
+            },
+            "issues": issues,
+            "recommendations": recommendations,
+            "ready_for_routing": error_count == 0
+        }
     
     def get_current_artifact(self) -> dict:
         """Get current artifact info"""

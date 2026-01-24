@@ -44,6 +44,8 @@ class AgentOrchestrator:
         self.current_analysis = None  # Cache for design analysis
         self.current_layout = None  # Cache for generated layout
         self.pending_command = None  # Store command waiting for confirmation
+        self.pcb_issues = []  # Store current PCB issues for reference
+        self.pcb_recommendations = []  # Store recommendations for selection
     
     def process_query(self, user_query: str, stream_callback: Optional[Callable[[str], None]] = None) -> Tuple[str, str, bool]:
         """
@@ -65,8 +67,28 @@ class AgentOrchestrator:
         # Quick pattern matching for common commands (faster than LLM)
         query_lower = user_query.lower()
         
+        # Apply recommendations pattern
+        if query_lower in ["yes", "yes please", "apply", "do it", "proceed", "apply recommendations"]:
+            action = "apply_recommendations"
+            intent_response = {"action": "apply_recommendations"}
+        # Ask about issues/mistakes
+        elif any(phrase in query_lower for phrase in ["what are mistake", "what are issue", "what are problem", "what is wrong", "find error", "find issue", "any mistake", "any issue", "any problem"]):
+            action = "list_issues"
+            intent_response = {"action": "list_issues"}
+        # Ask for solutions
+        elif any(phrase in query_lower for phrase in ["how to solve", "how to fix", "what is method", "what is solution", "how can i fix", "suggest solution", "recommend solution"]):
+            action = "suggest_solutions"
+            intent_response = {"action": "suggest_solutions"}
+        # Ask why something is an error
+        elif "why" in query_lower and any(word in query_lower for word in ["error", "issue", "problem", "wrong", "mistake"]):
+            action = "explain_error"
+            intent_response = {"action": "explain_error", "query": user_query}
+        # Select a specific solution
+        elif any(phrase in query_lower for phrase in ["use method", "apply method", "use solution", "apply solution", "option 1", "option 2", "option 3", "method 1", "method 2", "method 3"]):
+            action = "apply_selected"
+            intent_response = {"action": "apply_selected", "query": user_query}
         # DRC patterns
-        if any(word in query_lower for word in ["drc", "violation", "design rule check"]):
+        elif any(word in query_lower for word in ["drc", "violation", "design rule check"]):
             action = "drc"
             intent_response = {"action": "drc"}
         # Routing patterns
@@ -128,6 +150,41 @@ class AgentOrchestrator:
             response_text = self._handle_artifact_query(user_query)
             status = "artifact"
             is_execution = False
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
+        elif action == "apply_recommendations":
+            response_text = self._apply_recommendations()
+            status = "applied"
+            is_execution = True
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
+        elif action == "list_issues":
+            response_text = self._list_pcb_issues()
+            status = "issues_listed"
+            is_execution = False
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
+        elif action == "suggest_solutions":
+            response_text = self._suggest_solutions()
+            status = "solutions_suggested"
+            is_execution = False
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
+        elif action == "explain_error":
+            response_text = self._explain_error(user_query)
+            status = "explained"
+            is_execution = False
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
+        elif action == "apply_selected":
+            response_text = self._apply_selected_solution(user_query)
+            status = "applied"
+            is_execution = True
             self.conversation_history.append({"role": "assistant", "content": response_text})
             return response_text, status, is_execution
         
@@ -1513,6 +1570,297 @@ Would you like me to explain the placement strategy or make any adjustments?
                 
         except requests.exceptions.RequestException as e:
             return f"Error connecting to MCP server: {str(e)}\n\nMake sure the MCP server is running (python mcp_server.py)"
+    
+    def _list_pcb_issues(self) -> str:
+        """List all issues found in current PCB"""
+        import requests
+        
+        try:
+            # Get fresh DRC data
+            response = requests.get("http://localhost:8765/drc/run", timeout=10)
+            if response.status_code != 200:
+                return "No PCB loaded. Please upload a PCB file first."
+            
+            data = response.json()
+            if data.get("error"):
+                return f"Error: {data.get('error')}"
+            
+            violations = data.get("violations", [])
+            summary = data.get("summary", {})
+            
+            # Store for future reference
+            self.pcb_issues = violations
+            
+            if not violations:
+                return "✅ **No issues found!** Your PCB design looks good."
+            
+            result = f"## Issues Found in Your PCB\n\n"
+            result += f"**Total:** {len(violations)} issues ({summary.get('errors', 0)} errors, {summary.get('warnings', 0)} warnings)\n\n"
+            
+            # Group by type
+            errors = [v for v in violations if v.get("severity") == "error"]
+            warnings = [v for v in violations if v.get("severity") == "warning"]
+            
+            if errors:
+                result += "### 🔴 Errors (Must Fix)\n\n"
+                for i, err in enumerate(errors, 1):
+                    result += f"{i}. **{err.get('type', 'Unknown')}**: {err.get('message', '')}\n"
+                result += "\n"
+            
+            if warnings:
+                result += "### 🟡 Warnings (Should Fix)\n\n"
+                for i, warn in enumerate(warnings, 1):
+                    result += f"{i}. **{warn.get('type', 'Unknown')}**: {warn.get('message', '')}\n"
+                result += "\n"
+            
+            result += "---\n"
+            result += "💡 Ask **'how to solve these?'** for recommended solutions.\n"
+            result += "❓ Ask **'why is [issue] an error?'** for explanation."
+            
+            return result
+            
+        except requests.exceptions.RequestException as e:
+            return f"Error: {str(e)}"
+    
+    def _suggest_solutions(self) -> str:
+        """Suggest multiple solutions for the issues"""
+        import requests
+        
+        try:
+            # Get routing suggestions
+            response = requests.get("http://localhost:8765/routing/suggestions", timeout=10)
+            if response.status_code != 200:
+                return "No PCB loaded. Please upload a PCB file first."
+            
+            data = response.json()
+            suggestions = data.get("suggestions", [])
+            
+            # Store for selection
+            self.pcb_recommendations = suggestions
+            
+            if not suggestions:
+                return "No recommendations available. Your PCB may already be well-designed!"
+            
+            result = "## Solutions for Your PCB Issues\n\n"
+            result += "Here are the methods I recommend:\n\n"
+            
+            # Group by priority
+            high = [s for s in suggestions if s.get("priority") == "high"]
+            medium = [s for s in suggestions if s.get("priority") == "medium"]
+            normal = [s for s in suggestions if s.get("priority") == "normal"]
+            
+            method_num = 1
+            
+            if high:
+                result += "### 🔴 Critical (Fix First)\n\n"
+                for s in high[:3]:
+                    result += f"**Method {method_num}:** {s.get('recommendation', '')}\n"
+                    result += f"   - Net: `{s.get('net', '')}`\n"
+                    result += f"   - Layer: {s.get('layer', 'Top')}\n\n"
+                    method_num += 1
+            
+            if medium:
+                result += "### 🟡 Important\n\n"
+                for s in medium[:2]:
+                    result += f"**Method {method_num}:** {s.get('recommendation', '')}\n"
+                    result += f"   - Net: `{s.get('net', '')}`\n\n"
+                    method_num += 1
+            
+            if normal:
+                result += "### 🟢 Optional Improvements\n\n"
+                for s in normal[:2]:
+                    result += f"**Method {method_num}:** {s.get('recommendation', '')}\n"
+                    result += f"   - Net: `{s.get('net', '')}`\n\n"
+                    method_num += 1
+            
+            result += "---\n"
+            result += "To apply a solution, say:\n"
+            result += "- **'Apply method 1'** - Apply first recommendation\n"
+            result += "- **'Apply all'** - Apply all critical fixes\n"
+            result += "- **'yes'** - Apply all recommendations"
+            
+            return result
+            
+        except requests.exceptions.RequestException as e:
+            return f"Error: {str(e)}"
+    
+    def _explain_error(self, query: str) -> str:
+        """Explain why something is an error with reasoning"""
+        query_lower = query.lower()
+        
+        # Common PCB design error explanations
+        explanations = {
+            "unrouted": {
+                "title": "Unrouted Net",
+                "why": "An unrouted net means there is no physical copper connection between the pads that should be electrically connected.",
+                "risk": "Without routing, the circuit won't work - signals can't travel between components.",
+                "solution": "Create copper traces (routes) to connect all pads belonging to this net."
+            },
+            "power": {
+                "title": "Unrouted Power Net",
+                "why": "Power nets (VCC, VDD, +5V, etc.) carry the supply voltage to components. Without routing, components won't receive power.",
+                "risk": "Components will not function. The circuit is essentially dead without power distribution.",
+                "solution": "Route power nets with WIDE traces (0.5mm or more) to handle current flow and reduce voltage drop."
+            },
+            "ground": {
+                "title": "Unrouted Ground Net",
+                "why": "Ground (GND, VSS) provides the reference voltage for all signals and a return path for current.",
+                "risk": "Poor grounding causes noise, EMI issues, and unreliable operation. It's the #1 cause of PCB problems.",
+                "solution": "Use a ground PLANE on an internal layer, or route with very wide traces."
+            },
+            "clearance": {
+                "title": "Clearance Violation",
+                "why": "Clearance is the minimum distance between copper features. Too close and they might short circuit.",
+                "risk": "Manufacturing defects, short circuits, or electrical arcing in high-voltage designs.",
+                "solution": "Increase spacing between tracks/pads, or use narrower traces."
+            },
+            "width": {
+                "title": "Trace Width Violation",
+                "why": "Trace width determines current-carrying capacity. Too narrow traces overheat.",
+                "risk": "Traces can burn, melt, or cause fire in extreme cases. Also causes voltage drops.",
+                "solution": "Increase trace width based on current requirements. Power traces need more width."
+            }
+        }
+        
+        # Find which error type is being asked about
+        for key, exp in explanations.items():
+            if key in query_lower:
+                result = f"## Why is '{exp['title']}' an Error?\n\n"
+                result += f"### The Problem\n{exp['why']}\n\n"
+                result += f"### The Risk\n⚠️ {exp['risk']}\n\n"
+                result += f"### The Solution\n✅ {exp['solution']}\n"
+                return result
+        
+        # If no specific match, provide general explanation
+        if self.pcb_issues:
+            # Use the first stored issue as example
+            issue = self.pcb_issues[0]
+            result = f"## Explanation\n\n"
+            result += f"The issue **'{issue.get('type', 'Unknown')}'** is flagged because:\n\n"
+            result += f"- {issue.get('message', 'No details available')}\n\n"
+            result += "In PCB design, this typically indicates a problem that could affect:\n"
+            result += "- Circuit functionality\n"
+            result += "- Manufacturing quality\n"
+            result += "- Reliability\n\n"
+            result += "Ask about specific issues like 'why is unrouted power an error?' for detailed explanation."
+            return result
+        
+        return "Please specify which issue you want me to explain. For example: 'Why is unrouted power an error?'"
+    
+    def _apply_selected_solution(self, query: str) -> str:
+        """Apply a specific selected solution"""
+        import requests
+        import re
+        
+        query_lower = query.lower()
+        
+        # Extract method number
+        method_match = re.search(r'method\s*(\d+)|option\s*(\d+)|solution\s*(\d+)', query_lower)
+        
+        if method_match:
+            method_num = int(method_match.group(1) or method_match.group(2) or method_match.group(3))
+        elif "all" in query_lower:
+            # Apply all
+            return self._apply_recommendations()
+        else:
+            method_num = 1  # Default to first
+        
+        if not self.pcb_recommendations:
+            return "No solutions available. Ask 'how to solve these?' first to see options."
+        
+        if method_num < 1 or method_num > len(self.pcb_recommendations):
+            return f"Invalid method number. Choose between 1 and {len(self.pcb_recommendations)}."
+        
+        # Get the selected recommendation
+        rec = self.pcb_recommendations[method_num - 1]
+        net_name = rec.get("net", "")
+        
+        try:
+            # Apply the route
+            route_data = {
+                "net_id": f"net-{net_name.lower()}",
+                "start": [10, 10],
+                "end": [50, 50],
+                "layer": "L1",
+                "width": 0.5 if rec.get("priority") == "high" else 0.25
+            }
+            
+            response = requests.post("http://localhost:8765/routing/route", json=route_data, timeout=10)
+            
+            if response.status_code == 200:
+                result = f"## Method {method_num} Applied\n\n"
+                result += f"✅ **{rec.get('recommendation', 'Solution applied')}**\n\n"
+                result += f"- Net: `{net_name}`\n"
+                result += f"- Width: {route_data['width']}mm\n"
+                result += f"- Layer: Top\n\n"
+                result += "📁 Changes saved to artifact store.\n\n"
+                result += "Ask 'what are the remaining issues?' to see if more fixes are needed."
+                return result
+            else:
+                return f"Failed to apply: {response.text}"
+                
+        except requests.exceptions.RequestException as e:
+            return f"Error: {str(e)}"
+    
+    def _apply_recommendations(self) -> str:
+        """Apply the recommended changes based on analysis"""
+        import requests
+        
+        try:
+            # Get current PCB info and recommendations
+            response = requests.get("http://localhost:8765/pcb/info", timeout=10)
+            if response.status_code != 200:
+                return "No PCB loaded. Please upload a PCB file first."
+            
+            pcb_info = response.json()
+            if pcb_info.get("error"):
+                return "No PCB loaded. Please upload a PCB file first."
+            
+            # Get routing suggestions as basis for recommendations
+            suggestions_response = requests.get("http://localhost:8765/routing/suggestions", timeout=10)
+            if suggestions_response.status_code != 200:
+                return "Failed to get recommendations."
+            
+            suggestions = suggestions_response.json().get("suggestions", [])
+            
+            if not suggestions:
+                return "No recommendations to apply. Your PCB looks good!"
+            
+            # Apply high priority recommendations
+            applied = []
+            for suggestion in suggestions[:3]:  # Apply top 3
+                if suggestion.get("priority") == "high":
+                    net_name = suggestion.get("net", "")
+                    
+                    # Create a route for this net (simplified - in reality would use proper coordinates)
+                    route_data = {
+                        "net_id": f"net-{net_name.lower()}",
+                        "start": [10, 10],
+                        "end": [50, 50],
+                        "layer": "L1",
+                        "width": 0.5 if "power" in suggestion.get("recommendation", "").lower() else 0.25
+                    }
+                    
+                    route_response = requests.post(
+                        "http://localhost:8765/routing/route",
+                        json=route_data,
+                        timeout=10
+                    )
+                    
+                    if route_response.status_code == 200:
+                        applied.append(f"✅ Routed **{net_name}** with {route_data['width']}mm trace")
+            
+            if applied:
+                result = "## Recommendations Applied\n\n"
+                result += "\n".join(applied)
+                result += "\n\n📁 Changes saved to artifact store. "
+                result += "Ask 'show current artifact' to see the version history."
+                return result
+            else:
+                return "No high-priority recommendations to apply at this time."
+                
+        except requests.exceptions.RequestException as e:
+            return f"Error applying recommendations: {str(e)}"
     
     def _handle_artifact_query(self, query: str) -> str:
         """Handle artifact info queries via MCP server"""

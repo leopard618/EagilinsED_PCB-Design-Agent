@@ -630,25 +630,65 @@ I help with project creation, design analysis, layout generation, and command ex
                 stats = result.get("statistics", {})
                 artifact_id = result.get("artifact_id", "unknown")
                 layers = result.get("layers", 0)
+                analysis = result.get("analysis", {})
                 
-                # Build response
-                response = f"""PCB Loaded Successfully!
+                # Build response with intelligent analysis
+                response = f"""## PCB Loaded Successfully!
 
-File: {os.path.basename(filepath)}
-Artifact ID: {artifact_id[:8]}...
+**File:** {os.path.basename(filepath)}
+**Artifact ID:** {artifact_id[:8]}...
 
-Board Info:
-  • Layers: {layers}
-  • Tracks: {stats.get('track_count', 0)}
-  • Vias: {stats.get('via_count', 0)}
-  • Components: {stats.get('component_count', 0)}
-  • Nets: {stats.get('net_count', 0)}
+### Board Statistics
+• **Components:** {stats.get('component_count', 0)}
+• **Nets:** {stats.get('net_count', 0)}
+• **Tracks:** {stats.get('track_count', 0)}
+• **Vias:** {stats.get('via_count', 0)}
+• **Layers:** {layers}
+"""
+                
+                # Add intelligent analysis results
+                if analysis:
+                    summary = analysis.get("summary", {})
+                    issues = analysis.get("issues", [])
+                    recommendations = analysis.get("recommendations", [])
+                    
+                    if summary.get("total_issues", 0) > 0:
+                        response += f"""
+### ⚠️ Analysis Found {summary.get('total_issues', 0)} Issues
 
-You can now ask me to:
-  • Generate routing suggestions
-  • Run DRC check
-  • Analyze the design
-  • Optimize component placement"""
+**Errors:** {summary.get('errors', 0)} | **Warnings:** {summary.get('warnings', 0)}
+
+"""
+                        # Show top issues
+                        for issue in issues[:5]:
+                            icon = "🔴" if issue.get("severity") == "error" else "🟡"
+                            response += f"{icon} {issue.get('message', '')}\n"
+                        
+                        if len(issues) > 5:
+                            response += f"\n... and {len(issues) - 5} more issues\n"
+                        
+                        # Show recommendations
+                        if recommendations:
+                            response += f"""
+### 💡 Recommendations
+
+"""
+                            for i, rec in enumerate(recommendations[:3], 1):
+                                priority = rec.get("priority", "normal").upper()
+                                response += f"**{i}. [{priority}]** {rec.get('description', '')}\n"
+                            
+                            response += """
+**Would you like me to apply these recommendations?** Reply "yes" to proceed.
+"""
+                    else:
+                        response += """
+### ✅ No Critical Issues Found
+
+Your PCB looks good! You can still ask me to:
+• Generate routing suggestions
+• Run detailed DRC check
+• Optimize component placement
+"""
                 
                 self._safe_after(0, lambda: self.on_pcb_loaded(response, artifact_id))
                 

@@ -212,13 +212,138 @@ python main.py
 Week 1 successfully implemented the core infrastructure for an AI-driven PCB design agent. The system can:
 
 1. **Read** Altium PCB files directly (no scripts, no memory issues)
-2. **Analyze** board data (components, nets, layers)
-3. **Route** nets and place vias
-4. **Check** design rules (DRC)
-5. **Chat** with natural language
-6. **Track** changes with version control
+2. **Auto-Analyze** board on upload - finds issues automatically
+3. **Recommend** solutions with priority levels
+4. **Apply** changes when user confirms
+5. **Route** nets and place vias
+6. **Check** design rules (DRC)
+7. **Chat** with natural language
+8. **Track** changes with version control
 
 All without needing Altium Designer open!
+
+---
+
+## Intelligent Agent Features
+
+### Auto-Analysis on PCB Load
+When you upload a PCB, the agent automatically:
+1. Identifies unrouted power nets (errors)
+2. Identifies unrouted ground nets (errors)
+3. Identifies unrouted signal nets (warnings)
+4. Generates prioritized recommendations
+
+### Example Analysis Output
+```
+## PCB Loaded Successfully!
+
+### ⚠️ Analysis Found 12 Issues
+
+**Errors:** 7 | **Warnings:** 5
+
+🔴 Power net '+21V' has no routing
+🔴 Power net '+30VIN' has no routing
+🔴 Ground net 'GND' has no routing
+🟡 Signal net 'NetR222_1' needs routing
+
+### 💡 Recommendations
+
+**1. [HIGH]** Route power net '+21V' with wide traces (0.5mm+)
+**2. [HIGH]** Add ground plane for 'GND' on internal layer
+**3. [MEDIUM]** Route 5 signal nets with standard width
+
+**Would you like me to apply these recommendations?** Reply "yes" to proceed.
+```
+
+### Apply Recommendations
+User: "yes"
+Agent: 
+```
+## Recommendations Applied
+
+✅ Routed **+21V** with 0.5mm trace
+✅ Routed **+30VIN** with 0.5mm trace
+✅ Routed **GND** with 0.5mm trace
+
+📁 Changes saved to artifact store.
+```
+
+---
+
+## Conversational Commands
+
+### Ask About Issues
+| User Says | Agent Does |
+|-----------|------------|
+| "What are the mistakes?" | Lists all issues (errors + warnings) |
+| "What is wrong with this PCB?" | Lists all issues |
+| "Any problems?" | Lists all issues |
+
+### Ask for Solutions
+| User Says | Agent Does |
+|-----------|------------|
+| "How to solve these?" | Shows multiple solution methods |
+| "What is the method for fixing?" | Shows prioritized solutions |
+| "Suggest solutions" | Shows methods 1, 2, 3... |
+
+### Select a Solution
+| User Says | Agent Does |
+|-----------|------------|
+| "Apply method 1" | Applies first solution only |
+| "Use method 2" | Applies second solution only |
+| "Apply all" | Applies all solutions |
+| "yes" | Applies all recommendations |
+
+### Ask Why (Explanations)
+| User Says | Agent Does |
+|-----------|------------|
+| "Why is unrouted power an error?" | Explains power routing importance |
+| "Why is this a problem?" | Explains the risk and solution |
+| "Why do you think GND is an issue?" | Explains ground plane importance |
+
+### Example Conversation
+```
+User: What are the mistakes in this PCB?
+
+Agent: ## Issues Found in Your PCB
+       **Total:** 12 issues (7 errors, 5 warnings)
+       
+       ### 🔴 Errors (Must Fix)
+       1. Power Net Unrouted: +21V has no routing
+       2. Power Net Unrouted: +30VIN has no routing
+       
+       💡 Ask 'how to solve these?' for solutions
+
+User: How to solve these?
+
+Agent: ## Solutions for Your PCB Issues
+       
+       **Method 1:** Route +21V with wide traces (0.5mm+)
+       **Method 2:** Route +30VIN with wide traces (0.5mm+)
+       **Method 3:** Add ground plane for GND
+       
+       Say 'Apply method 1' or 'Apply all'
+
+User: Why is unrouted power an error?
+
+Agent: ## Why is 'Unrouted Power Net' an Error?
+       
+       ### The Problem
+       Power nets carry supply voltage. Without routing,
+       components won't receive power.
+       
+       ### The Risk
+       ⚠️ Components will not function.
+       
+       ### The Solution
+       ✅ Route with WIDE traces (0.5mm+)
+
+User: Apply method 1
+
+Agent: ## Method 1 Applied
+       ✅ Routed +21V with 0.5mm trace
+       📁 Changes saved.
+```
 
 ---
 
