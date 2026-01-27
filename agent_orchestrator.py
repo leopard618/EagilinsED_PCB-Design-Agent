@@ -67,6 +67,31 @@ class AgentOrchestrator:
         # Quick pattern matching for common commands (faster than LLM)
         query_lower = user_query.lower()
         
+        # Component location query - DIRECT ANSWER (no LLM)
+        if "where" in query_lower or "location" in query_lower or "find" in query_lower:
+            # Check if asking about a specific component
+            import re
+            comp_match = re.search(r'\b([A-Z]{1,3}[0-9]+)\b', user_query, re.IGNORECASE)
+            if comp_match:
+                comp_name = comp_match.group(1).upper()
+                response = self._get_component_location_direct(comp_name, all_context)
+                if response:
+                    self.conversation_history.append({"role": "assistant", "content": response})
+                    return response, "answered", False
+        
+        # Move component command - DIRECT EXECUTION
+        if "move" in query_lower:
+            import re
+            # Pattern: "move R122 to 95, 65" or "move R122 to (95, 65)"
+            move_match = re.search(r'move\s+([A-Z]{1,3}[0-9]+)\s+to\s+\(?(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\)?', user_query, re.IGNORECASE)
+            if move_match:
+                comp_name = move_match.group(1).upper()
+                new_x = float(move_match.group(2))
+                new_y = float(move_match.group(3))
+                response = self._move_component_direct(comp_name, new_x, new_y, all_context)
+                self.conversation_history.append({"role": "assistant", "content": response})
+                return response, "executed", True
+        
         # Apply recommendations pattern
         if query_lower in ["yes", "yes please", "apply", "do it", "proceed", "apply recommendations"]:
             action = "apply_recommendations"
@@ -87,20 +112,41 @@ class AgentOrchestrator:
         elif any(phrase in query_lower for phrase in ["use method", "apply method", "use solution", "apply solution", "option 1", "option 2", "option 3", "method 1", "method 2", "method 3"]):
             action = "apply_selected"
             intent_response = {"action": "apply_selected", "query": user_query}
+        # Check DRC result from Altium
+        elif "check drc result" in query_lower or "drc result" in query_lower:
+            action = "check_altium_drc"
+            intent_response = {"action": "check_altium_drc"}
         # DRC patterns
         elif any(word in query_lower for word in ["drc", "violation", "design rule check"]):
             action = "drc"
             intent_response = {"action": "drc"}
         # Routing patterns
-        elif "routing suggestion" in query_lower or "routing strategy" in query_lower or "generate routing" in query_lower:
+        elif ("routing suggestion" in query_lower or "routing strategy" in query_lower or 
+              "generate routing" in query_lower or "what.*routing" in query_lower.replace(" ", "") or
+              "routing.*suggest" in query_lower.replace(" ", "")):
             action = "routing"
             intent_response = {"action": "routing", "routing_action": "suggestions"}
+        elif "what nets need routing" in query_lower or "nets need routing" in query_lower or "unrouted nets" in query_lower:
+            action = "routing"
+            intent_response = {"action": "routing", "routing_action": "suggestions", "filter": "unrouted"}
+        elif ("power" in query_lower and "routing" in query_lower) or ("routing" in query_lower and "power" in query_lower) or "suggest routing for power" in query_lower:
+            action = "routing"
+            intent_response = {"action": "routing", "routing_action": "suggestions", "filter": "power"}
         elif "route net" in query_lower or ("route" in query_lower and "from" in query_lower):
             action = "routing"
             intent_response = {"action": "routing", "routing_action": "route"}
         elif "place" in query_lower and "via" in query_lower:
             action = "routing"
             intent_response = {"action": "routing", "routing_action": "via"}
+        # Design rules patterns
+        elif any(phrase in query_lower for phrase in [
+            "design rule", "design rules", "what.*rule", "show.*rule", "list.*rule", 
+            "clearance rule", "width rule", "via rule", "constraint",
+            "minimum trace width", "min trace width", "trace width", "minimum width",
+            "clearance", "minimum clearance", "via size", "via drill"
+        ]):
+            action = "design_rules"
+            intent_response = {"action": "design_rules", "query": user_query}
         # Artifact patterns
         elif any(word in query_lower for word in ["artifact", "uuid", "where is my data"]):
             action = "artifact"
@@ -139,10 +185,24 @@ class AgentOrchestrator:
             self.conversation_history.append({"role": "assistant", "content": response_text})
             return response_text, status, is_execution
         
+        elif action == "check_altium_drc":
+            response_text = self._check_altium_drc_result()
+            status = "drc"
+            is_execution = False
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
         elif action == "drc":
             response_text = self._handle_drc(user_query)
             status = "drc"
             is_execution = True
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            return response_text, status, is_execution
+        
+        elif action == "design_rules":
+            response_text = self._handle_design_rules_query(user_query, all_context)
+            status = "info"
+            is_execution = False
             self.conversation_history.append({"role": "assistant", "content": response_text})
             return response_text, status, is_execution
         
@@ -497,7 +557,7 @@ class AgentOrchestrator:
 
 The user may be requesting:
 1. DESIGN ANALYSIS - Analyze PCB, identify functional blocks
-2. PLACEMENT STRATEGY - Generate component placement recommendations  
+2. PLACEMENT STRATEGY - Generate component placement recommendations
 3. DESIGN REVIEW - Review design for issues, DRC violations
 4. ANSWER - Answer questions about components, nets, layers, routing, DRC
 5. EXECUTE - Route nets, place vias, run DRC
@@ -956,55 +1016,70 @@ Default to answering questions using the loaded PCB data."""
             context += f"Layers ({len(layers)}): {', '.join(layer_names)}\n"
         
         # Only include detailed data if query asks for it
-        if "component" in query_lower or "where" in query_lower or "location" in query_lower or "size" in query_lower or "value" in query_lower:
+        if "component" in query_lower or "where" in query_lower or "location" in query_lower or "size" in query_lower or "value" in query_lower or "find" in query_lower:
             components = pcb_info.get("components", [])
             if components:
-                # Extract component name from query (e.g., "C168", "R1", etc.)
-                # Look for patterns like "C168", "R1", "U12", etc.
+                # Extract component name from query - support various formats
+                # e.g., "C168", "R1", "R122", "U12", "D1", "L1", "T1", etc.
                 import re
-                comp_pattern = re.search(r'\b([CRUDLT][0-9]+)\b', query, re.IGNORECASE)
+                # Pattern for component designators (letter(s) followed by numbers)
+                comp_pattern = re.search(r'\b([A-Z]{1,3}[0-9]+)\b', query, re.IGNORECASE)
                 found_component = None
+                target_name = None
                 
                 if comp_pattern:
-                    # Search for exact component name match
+                    # Search for exact component name match (case-insensitive)
                     target_name = comp_pattern.group(1).upper()  # Normalize to uppercase
                     for comp in components:
-                        comp_name = comp.get("name", "") if isinstance(comp, dict) else str(comp)
-                        if comp_name.upper() == target_name:
+                        if isinstance(comp, dict):
+                            comp_name = comp.get("designator", comp.get("name", "")).upper()
+                        else:
+                            comp_name = str(comp).upper()
+                        if comp_name == target_name:
                             found_component = comp
                             break
                 
                 # If not found by pattern, try substring match
                 if not found_component:
                     for comp in components:
-                        comp_name = comp.get("name", "") if isinstance(comp, dict) else str(comp)
+                        if isinstance(comp, dict):
+                            comp_name = comp.get("designator", comp.get("name", ""))
+                        else:
+                            comp_name = str(comp)
                         # Check if component name appears in query
-                        if comp_name.lower() in query_lower or query_lower in comp_name.lower():
+                        if comp_name.lower() in query_lower:
                             found_component = comp
+                            target_name = comp_name.upper()
                             break
                 
                 if found_component:
-                    # Include full details for this component
-                    comp_name = found_component.get("name", "") if isinstance(found_component, dict) else str(found_component)
-                    context += f"\nComponent {comp_name}:\n"
+                    # Include full details for this component - DIRECT ANSWER
+                    comp_name = found_component.get("designator", found_component.get("name", "")) if isinstance(found_component, dict) else str(found_component)
                     loc = found_component.get("location", {})
-                    size = found_component.get("size", {})
-                    context += f"  Location: ({loc.get('x_mm', 0):.2f}, {loc.get('y_mm', 0):.2f}) mm\n"
-                    context += f"  Size: {size.get('width_mm', 0):.2f} x {size.get('height_mm', 0):.2f} mm\n"
-                    context += f"  Layer: {found_component.get('layer', 'Unknown')}\n"
-                    context += f"  Footprint: {found_component.get('footprint', 'Unknown')}\n"
-                    context += f"  Rotation: {found_component.get('rotation_degrees', 0):.1f} degrees\n"
-                    # Extract value from parameters
-                    params = found_component.get("parameters", [])
-                    if params and isinstance(params, list):
-                        for param in params:
-                            if isinstance(param, dict) and param.get("name") == "Value":
-                                context += f"  Value: {param.get('value', 'Unknown')}\n"
-                                break
+                    x_mm = loc.get('x_mm', 0)
+                    y_mm = loc.get('y_mm', 0)
+                    layer = found_component.get('layer', 'Unknown')
+                    footprint = found_component.get('footprint', 'Unknown')
+                    rotation = found_component.get('rotation_degrees', 0)
+                    
+                    context += f"\n*** FOUND: {comp_name} ***\n"
+                    context += f"  Location: X={x_mm:.2f}mm, Y={y_mm:.2f}mm\n"
+                    context += f"  Layer: {layer}\n"
+                    context += f"  Footprint: {footprint}\n"
+                    context += f"  Rotation: {rotation:.1f}°\n"
+                    if found_component.get("lib_reference"):
+                        context += f"  Part: {found_component.get('lib_reference', '')}\n"
+                    if found_component.get("unique_id"):
+                        context += f"  UID: {found_component.get('unique_id', '')}\n"
                 else:
-                    # Just list some component names as examples
-                    comp_names = [c.get("name", "") if isinstance(c, dict) else str(c) for c in components[:15]]
-                    context += f"Sample components: {', '.join(comp_names)}\n"
+                    # Component not found
+                    if target_name:
+                        context += f"\n*** {target_name} NOT FOUND in component list ***\n"
+                    # Show available components as examples
+                    comp_names = [c.get("designator", c.get("name", "")) if isinstance(c, dict) else str(c) for c in components[:20]]
+                    context += f"Available components ({len(components)} total): {', '.join(comp_names[:20])}\n"
+                    if len(components) > 20:
+                        context += f"... and {len(components) - 20} more\n"
         
         # Handle list queries (all resistors, all capacitors, etc.)
         if "list" in query_lower or "all" in query_lower or "show" in query_lower:
@@ -1021,9 +1096,33 @@ Default to answering questions using the loaded PCB data."""
                     if capacitors:
                         context += f"\nCapacitors on board: {', '.join(capacitors[:30])}\n"
                 else:
-                    # List all components
-                    comp_names = [c.get("name", "") if isinstance(c, dict) else str(c) for c in components[:50]]
-                    context += f"\nComponents on board: {', '.join(comp_names)}\n"
+                    # Check if filtering by layer
+                    if "top layer" in query_lower or "top" in query_lower:
+                        # Filter components on top layer
+                        top_components = []
+                        for c in components:
+                            if isinstance(c, dict):
+                                layer = c.get("layer", "").lower()
+                                if "top" in layer or layer == "top":
+                                    comp_name = c.get("designator", c.get("name", "Unknown"))
+                                    top_components.append(comp_name)
+                        if top_components:
+                            context += f"\nComponents on Top layer ({len(top_components)}): {', '.join(top_components[:30])}\n"
+                    elif "bottom layer" in query_lower or "bottom" in query_lower:
+                        # Filter components on bottom layer
+                        bottom_components = []
+                        for c in components:
+                            if isinstance(c, dict):
+                                layer = c.get("layer", "").lower()
+                                if "bottom" in layer or layer == "bottom":
+                                    comp_name = c.get("designator", c.get("name", "Unknown"))
+                                    bottom_components.append(comp_name)
+                        if bottom_components:
+                            context += f"\nComponents on Bottom layer ({len(bottom_components)}): {', '.join(bottom_components[:30])}\n"
+                    else:
+                        # List all components
+                        comp_names = [c.get("designator", c.get("name", "")) if isinstance(c, dict) else str(c) for c in components[:50]]
+                        context += f"\nComponents on board: {', '.join(comp_names)}\n"
         
         if "net" in query_lower:
             nets = pcb_info.get("nets", [])
@@ -1031,10 +1130,17 @@ Default to answering questions using the loaded PCB data."""
                 net_names = [n.get("name", "") if isinstance(n, dict) else str(n) for n in nets[:15]]
                 context += f"Nets: {', '.join(net_names)}\n"
         
-        if "layer" in query_lower:
+        if "layer" in query_lower and "component" not in query_lower:
             layers = pcb_info.get("layers", [])
             if layers:
-                context += f"Layers: {', '.join(layers)}\n"
+                # Extract layer names (layers can be dicts or strings)
+                layer_names = []
+                for layer in layers:
+                    if isinstance(layer, dict):
+                        layer_names.append(layer.get("name", str(layer)))
+                    else:
+                        layer_names.append(str(layer))
+                context += f"Layers: {', '.join(layer_names[:20])}\n"
         
         return context
     
@@ -1403,19 +1509,98 @@ Would you like me to explain the placement strategy or make any adjustments?
         
         try:
             if routing_action == "suggestions":
+                # Get filter from intent first, then analyze query
+                filter_type = intent.get("filter")
+                if not filter_type:
+                    query_lower = query.lower()
+                    if "power" in query_lower or "pwr" in query_lower or "vcc" in query_lower or "vdd" in query_lower:
+                        filter_type = "power"
+                    elif "unrouted" in query_lower or "need" in query_lower or "missing" in query_lower:
+                        filter_type = "unrouted"
+                    elif "signal" in query_lower:
+                        filter_type = "signal"
+                
+                # Build URL with filter
+                url = "http://localhost:8765/routing/suggestions"
+                if filter_type:
+                    url += f"?filter={filter_type}"
+                
                 # Get routing suggestions
-                response = requests.get("http://localhost:8765/routing/suggestions", timeout=10)
+                response = requests.get(url, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
+                    if data.get("error"):
+                        return f"Error: {data.get('error')}"
+                    
                     suggestions = data.get("suggestions", [])
+                    summary = data.get("summary", "")
+                    total_nets = data.get("total_nets", 0)
+                    routed_nets = data.get("routed_nets", 0)
+                    unrouted_nets = data.get("unrouted_nets", 0)
+                    
                     if suggestions:
-                        result = "## Routing Suggestions\n\n"
-                        for i, s in enumerate(suggestions, 1):
-                            result += f"{i}. **{s.get('net', 'Unknown')}**: {s.get('recommendation', '')}\n"
-                            result += f"   Priority: {s.get('priority', 'normal')}\n\n"
+                        # Build context-aware response
+                        if filter_type == "power":
+                            result = "## ⚡ Power Net Routing Analysis\n\n"
+                        elif filter_type == "unrouted":
+                            result = "## 🔴 Unrouted Nets Analysis\n\n"
+                        else:
+                            result = "## 🔌 Routing Suggestions & Analysis\n\n"
+                        
+                        # Add overall statistics
+                        result += f"**PCB Status:** {total_nets} total nets | {routed_nets} routed | {unrouted_nets} unrouted\n\n"
+                        
+                        # Add summary
+                        if summary:
+                            result += f"**{summary}**\n\n"
+                        
+                        # Group by priority
+                        high_priority = [s for s in suggestions if s.get("priority") == "HIGH"]
+                        medium_priority = [s for s in suggestions if s.get("priority") == "MEDIUM"]
+                        normal_priority = [s for s in suggestions if s.get("priority") == "NORMAL"]
+                        
+                        # Show unrouted first, then routed
+                        if high_priority:
+                            result += "### 🔴 HIGH Priority (Route First)\n\n"
+                            for s in high_priority[:10]:
+                                status_icon = "✅" if s.get("status") == "routed" else "🔴"
+                                result += f"{status_icon} **{s.get('net', 'Unknown')}** - {s.get('status', 'unknown').upper()}\n"
+                                result += f"   {s.get('recommendation', '')}\n"
+                                result += f"   **Trace Width**: {s.get('width_suggestion', 'N/A')}\n"
+                                result += f"   **Layer**: {s.get('layer_suggestion', 'N/A')}\n"
+                                components = s.get('component_list', [])
+                                if components:
+                                    result += f"   **Components**: {', '.join(components[:3])}"
+                                    if len(components) > 3:
+                                        result += f" (+{len(components)-3} more)"
+                                    result += "\n"
+                                result += "\n"
+                        
+                        if medium_priority:
+                            result += "### ⚠️ MEDIUM Priority\n\n"
+                            for s in medium_priority[:10]:
+                                status_icon = "✅" if s.get("status") == "routed" else "⚠️"
+                                result += f"{status_icon} **{s.get('net', 'Unknown')}** - {s.get('status', 'unknown').upper()}\n"
+                                result += f"   {s.get('recommendation', '')}\n"
+                                result += f"   **Trace Width**: {s.get('width_suggestion', 'N/A')}\n"
+                                result += f"   **Layer**: {s.get('layer_suggestion', 'N/A')}\n\n"
+                        
+                        if normal_priority and len(high_priority) + len(medium_priority) < 15:
+                            result += "### 📋 Normal Priority\n\n"
+                            for s in normal_priority[:10]:
+                                status_icon = "✅" if s.get("status") == "routed" else "📋"
+                                result += f"{status_icon} **{s.get('net', 'Unknown')}** - {s.get('status', 'unknown').upper()}\n"
+                                result += f"   {s.get('recommendation', '')}\n\n"
+                        
+                        result += "---\n"
+                        result += "💡 **To route a specific net:** Ask me: `route net <name> from <x1>,<y1> to <x2>,<y2>`\n"
+                        result += "💡 **For more specific suggestions:** Ask `routing suggestions for power nets` or `what nets need routing?`"
+                        
                         return result
                     else:
-                        return "No routing suggestions available. Make sure a PCB is loaded."
+                        if filter_type:
+                            return f"No {filter_type} nets found matching your query. All nets may be routed or filtered out."
+                        return "No routing suggestions available. Make sure a PCB is loaded and has nets."
                 else:
                     return f"Failed to get routing suggestions: {response.text}"
             
@@ -1506,63 +1691,31 @@ Would you like me to explain the placement strategy or make any adjustments?
         """Handle DRC commands via MCP server"""
         import requests
         
-        query_lower = query.lower()
-        
         try:
             response = requests.get("http://localhost:8765/drc/run", timeout=10)
             if response.status_code == 200:
                 data = response.json()
-                violations = data.get("violations", [])
-                summary = data.get("summary", {})
                 stats = data.get("stats", {})
+                note = data.get("note", "")
                 
-                # Filter violations based on query
-                filtered_violations = violations
-                filter_type = None
+                # Build honest response - Python reader can't do full DRC
+                result = "## DRC Check Results\n\n"
+                result += "### Board Statistics (from Python reader)\n"
+                result += f"• **Components:** {stats.get('components', 0)}\n"
+                result += f"• **Nets:** {stats.get('nets', 0)}\n"
+                result += f"• **Tracks:** {stats.get('tracks', 0)}\n"
+                result += f"• **Vias:** {stats.get('vias', 0)}\n\n"
                 
-                if "clearance" in query_lower:
-                    filter_type = "clearance"
-                    filtered_violations = [v for v in violations if "clearance" in v.get("type", "").lower()]
-                elif "width" in query_lower or "trace" in query_lower:
-                    filter_type = "width"
-                    filtered_violations = [v for v in violations if "width" in v.get("type", "").lower()]
-                elif "power" in query_lower:
-                    filter_type = "power"
-                    filtered_violations = [v for v in violations if "power" in v.get("type", "").lower() or "power" in v.get("message", "").lower()]
-                elif "unrouted" in query_lower:
-                    filter_type = "unrouted"
-                    filtered_violations = [v for v in violations if "unrouted" in v.get("type", "").lower()]
+                result += "### ⚠️ For Accurate DRC\n"
+                result += "The Python file reader provides **statistics only**.\n"
+                result += "It cannot detect clearance violations, short circuits, or unrouted nets.\n\n"
+                result += "**Run Altium DRC for accurate results:**\n"
+                result += "1. In Altium: **Tools → Design Rule Check**\n"
+                result += "2. Click **Run Design Rule Check**\n"
+                result += "3. View violations in the Messages panel\n\n"
                 
-                # Build response based on context
-                if filter_type:
-                    result = f"## {filter_type.title()} Violations\n\n"
-                    if filtered_violations:
-                        result += f"Found **{len(filtered_violations)}** {filter_type} violations:\n\n"
-                        for i, v in enumerate(filtered_violations[:10], 1):
-                            result += f"{i}. **{v.get('type', 'Unknown')}** ({v.get('severity', 'warning')})\n"
-                            result += f"   {v.get('message', 'No details')}\n\n"
-                    else:
-                        result += f"✅ No {filter_type} violations found!\n"
-                else:
-                    # General DRC summary
-                    result = "## DRC Check Results\n\n"
-                    result += f"**Total Violations:** {summary.get('total', len(violations))}\n"
-                    result += f"**Errors:** {summary.get('errors', 0)}\n"
-                    result += f"**Warnings:** {summary.get('warnings', 0)}\n\n"
-                    
-                    if stats:
-                        result += f"**Board Stats:** {stats.get('components', 0)} components, {stats.get('nets', 0)} nets\n\n"
-                    
-                    if violations:
-                        result += "### Violations:\n"
-                        for i, v in enumerate(violations[:10], 1):
-                            result += f"{i}. **{v.get('type', 'Unknown')}** ({v.get('severity', 'warning')})\n"
-                            result += f"   {v.get('message', 'No details')}\n\n"
-                        
-                        if len(violations) > 10:
-                            result += f"... and {len(violations) - 10} more violations\n"
-                    else:
-                        result += "✅ **No violations found!** Your design passes all DRC checks.\n"
+                result += "---\n"
+                result += "💡 The agent can help you **analyze** and **fix** issues found by Altium DRC."
                 
                 return result
             else:
@@ -1861,6 +2014,565 @@ Would you like me to explain the placement strategy or make any adjustments?
                 
         except requests.exceptions.RequestException as e:
             return f"Error applying recommendations: {str(e)}"
+    
+    def _move_component_direct(self, comp_name: str, new_x: float, new_y: float, all_context: Dict[str, Any]) -> str:
+        """
+        Move a component - creates a command for Altium script server.
+        Also updates the artifact store.
+        """
+        import requests
+        from tools.altium_script_client import AltiumScriptClient
+        
+        # First, get current location
+        pcb_info = all_context.get("pcb_info", {})
+        components = pcb_info.get("components", [])
+        
+        found = None
+        for comp in components:
+            if isinstance(comp, dict):
+                designator = comp.get("designator", comp.get("name", "")).upper()
+                if designator == comp_name.upper():
+                    found = comp
+                    break
+        
+        if not found:
+            return f"❌ Component **{comp_name}** not found in this PCB."
+        
+        old_loc = found.get("location", {})
+        old_x = old_loc.get("x_mm", 0)
+        old_y = old_loc.get("y_mm", 0)
+        
+        # Try to send command to Altium script server
+        client = AltiumScriptClient()
+        result = client.move_component(comp_name, new_x, new_y)
+        
+        if result.get("success"):
+            # Command sent to Altium successfully
+            response = f"✅ **{comp_name}** moved successfully!\n\n"
+            response += f"• **From:** X = {old_x:.2f} mm, Y = {old_y:.2f} mm\n"
+            response += f"• **To:** X = {new_x:.2f} mm, Y = {new_y:.2f} mm\n\n"
+            response += "The change has been applied in Altium Designer."
+        elif result.get("error") == "Timeout waiting for Altium response":
+            # Altium script server not running - save to artifact store instead
+            response = f"📝 **Move Command Ready** for **{comp_name}**\n\n"
+            response += f"• **From:** X = {old_x:.2f} mm, Y = {old_y:.2f} mm\n"
+            response += f"• **To:** X = {new_x:.2f} mm, Y = {new_y:.2f} mm\n\n"
+            response += "**Next Step - In Altium Designer:**\n"
+            response += "Run: `DXP → Run Script → command_server.pas → ExecuteNow`\n\n"
+            response += "The script will:\n"
+            response += f"1. Move {comp_name} to the new position\n"
+            response += "2. **Automatically run DRC**\n"
+            response += "3. Show you any new errors/warnings\n\n"
+            response += "💡 After running, ask me: `check DRC result`"
+            
+            # Save command to file for later execution
+            try:
+                import json
+                with open("altium_command.json", 'w') as f:
+                    json.dump({
+                        "action": "move_component",
+                        "designator": comp_name,
+                        "x": new_x,
+                        "y": new_y
+                    }, f)
+            except:
+                pass
+        else:
+            response = f"❌ Error moving component: {result.get('error', 'Unknown error')}"
+        
+        return response
+    
+    def _get_component_location_direct(self, comp_name: str, all_context: Dict[str, Any]) -> Optional[str]:
+        """
+        Get component location DIRECTLY from data - no LLM hallucination.
+        Returns formatted response or None if component not found.
+        """
+        pcb_info = all_context.get("pcb_info", {})
+        components = pcb_info.get("components", [])
+        
+        if not components:
+            return None
+        
+        # Search for the component (case-insensitive)
+        found = None
+        for comp in components:
+            if isinstance(comp, dict):
+                designator = comp.get("designator", comp.get("name", "")).upper()
+                if designator == comp_name.upper():
+                    found = comp
+                    break
+        
+        if not found:
+            # Component not found - list available components
+            available = [c.get("designator", c.get("name", "")) for c in components[:30] if isinstance(c, dict)]
+            return f"❌ **{comp_name}** not found in this PCB.\n\nAvailable components ({len(components)} total):\n{', '.join(available)}..."
+        
+        # Found! Return exact data
+        loc = found.get("location", {})
+        x_mm = loc.get("x_mm", 0)
+        y_mm = loc.get("y_mm", 0)
+        layer = found.get("layer", "Unknown")
+        footprint = found.get("footprint", "Unknown")
+        rotation = found.get("rotation_degrees", 0)
+        
+        response = f"📍 **{comp_name}** Location:\n\n"
+        response += f"• **Position:** X = {x_mm:.2f} mm, Y = {y_mm:.2f} mm\n"
+        response += f"• **Layer:** {layer}\n"
+        response += f"• **Footprint:** {footprint}\n"
+        response += f"• **Rotation:** {rotation:.1f}°\n"
+        
+        if found.get("lib_reference"):
+            response += f"• **Part:** {found.get('lib_reference')}\n"
+        
+        return response
+    
+    def _check_altium_drc_result(self) -> str:
+        """Read DRC results from Altium's HTML report, parse, and generate AI summary"""
+        from tools.drc_report_parser import parse_drc_report
+        
+        # Parse the DRC report
+        report_data = parse_drc_report()
+        
+        if "error" in report_data:
+            return f"## DRC Results\n\n❌ **{report_data['error']}**\n\n" + \
+                   "**To run DRC manually in Altium Designer:**\n\n" + \
+                   "1. In Altium Designer: **Tools → Design Rule Check...**\n" + \
+                   "2. Click **'Run Design Rule Check'** button\n" + \
+                   "3. Wait for DRC to complete (may take a few seconds)\n" + \
+                   "4. The report will be saved automatically\n" + \
+                   "5. Then ask me again: **`check DRC result`**\n\n" + \
+                   "**Or use the menu:**\n" + \
+                   "• Click **⋮** → **Run DRC** (then follow steps above)\n\n" + \
+                   "Once DRC completes, I'll automatically analyze the results!"
+        
+        summary = report_data.get("summary", {})
+        violations = report_data.get("total_violations", 0)
+        warnings = report_data.get("total_warnings", 0)
+        violations_by_type = report_data.get("violations_by_type", {})
+        detailed_violations = report_data.get("detailed_violations", [])
+        
+        # Build response with AI analysis
+        response = "## 📊 DRC Analysis Report (AI-Powered)\n\n"
+        response += "💡 **This is more than just a DRC report!** I analyze violations and provide actionable recommendations.\n\n"
+        
+        # Overall status
+        if violations == 0 and warnings == 0:
+            response += "✅ **Design is Clean!** No violations or warnings detected.\n\n"
+            response += "Your PCB design passes all design rule checks. You can proceed with:\n"
+            response += "• Final routing\n"
+            response += "• Manufacturing preparation\n"
+            response += "• Design review\n\n"
+            return response
+        
+        # Show counts
+        if violations > 0:
+            response += f"🔴 **{violations} Rule Violation(s)** detected\n"
+        if warnings > 0:
+            response += f"⚠️ **{warnings} Warning(s)** detected\n"
+        response += "\n"
+        
+        # Violations by type
+        if violations_by_type:
+            response += "### Violation Breakdown\n\n"
+            for vtype, count in sorted(violations_by_type.items(), key=lambda x: x[1], reverse=True):
+                response += f"• **{vtype}**: {count}\n"
+            response += "\n"
+        
+        # Show key violations (first 5)
+        if detailed_violations:
+            response += "### Key Violations\n\n"
+            for i, viol in enumerate(detailed_violations[:5], 1):
+                comp = viol.get("component", "")
+                net = viol.get("net", "")
+                rule_type = viol.get("type", "unknown")
+                message = viol.get("message", "")[:100]
+                
+                response += f"**{i}. {rule_type.upper().replace('_', ' ')}**"
+                if comp:
+                    response += f" - Component: {comp}"
+                if net:
+                    response += f" - Net: {net}"
+                response += "\n"
+                if message:
+                    response += f"   {message}\n"
+                response += "\n"
+        
+        # AI-generated recommendations
+        response += "---\n"
+        response += "### 💡 AI-Powered Recommendations\n\n"
+        response += "**Why use the agent instead of just reading Altium's report?**\n"
+        response += "• **Intelligent Analysis** - I understand the context and impact of each violation\n"
+        response += "• **Prioritized Actions** - Focus on high-impact fixes first\n"
+        response += "• **Specific Solutions** - Not just 'there's a violation', but 'move C135 to fix it'\n"
+        response += "• **Natural Language** - Ask me questions about any violation\n"
+        response += "• **Fix Execution** - I can help fix violations via chat commands\n\n"
+        
+        # Generate AI summary
+        ai_summary = self._generate_drc_ai_summary(report_data)
+        response += ai_summary
+        
+        return response
+    
+    def _generate_drc_ai_summary(self, report_data: Dict[str, Any]) -> str:
+        """Generate AI-powered summary and recommendations from DRC report"""
+        violations = report_data.get("total_violations", 0)
+        warnings = report_data.get("total_warnings", 0)
+        violations_by_type = report_data.get("violations_by_type", {})
+        detailed_violations = report_data.get("detailed_violations", [])
+        
+        # Build context for LLM
+        context = f"""
+DRC Report Summary:
+- Total Violations: {violations}
+- Total Warnings: {warnings}
+- Violation Types: {', '.join(violations_by_type.keys())}
+
+Top Violations:
+"""
+        for i, viol in enumerate(detailed_violations[:10], 1):
+            context += f"{i}. {viol.get('type', 'unknown')}: {viol.get('message', '')[:80]}\n"
+        
+        # Create prompt for LLM
+        prompt = f"""You are a PCB design expert analyzing a Design Rule Check (DRC) report from Altium Designer.
+
+{context}
+
+The user can already see the raw DRC report in Altium. Your job is to provide VALUE-ADDED intelligence:
+
+1. **Interpretation**: What do these violations actually mean? What's the impact?
+2. **Prioritization**: Which violations should be fixed first and why?
+3. **Specific Solutions**: Not just "fix clearance violation" but "move component C135 2mm to the right"
+4. **Context**: How do these violations relate to each other? Are there patterns?
+5. **Actionable Steps**: Concrete commands the user can give you to fix issues
+
+Provide a concise, actionable summary with:
+- Overall assessment (1-2 sentences)
+- Top 3 priority issues to address first (with specific component/net names)
+- Specific fix recommendations (e.g., "move C135 to position 50, 60")
+- Patterns or related issues
+- Next steps
+
+Be specific and actionable. The user wants to know HOW to fix things, not just WHAT is wrong."""
+
+        try:
+            # Use LLM to generate summary
+            summary = self.llm_client.generate_response(
+                prompt,
+                max_tokens=500,
+                temperature=0.7
+            )
+            return summary.strip()
+        except Exception as e:
+            # Fallback to rule-based recommendations
+            return self._generate_fallback_recommendations(violations_by_type, detailed_violations)
+    
+    def _generate_fallback_recommendations(self, violations_by_type: Dict[str, int], 
+                                         detailed_violations: List[Dict[str, Any]]) -> str:
+        """Generate rule-based recommendations if LLM fails"""
+        recommendations = []
+        
+        if "clearance" in str(violations_by_type).lower():
+            recommendations.append("• **Clearance Violations**: Ensure minimum 0.2mm spacing between components, pads, and tracks")
+            recommendations.append("  - Move components further apart")
+            recommendations.append("  - Check pad-to-pad clearances")
+            recommendations.append("  - Verify track-to-component spacing")
+        
+        if "width" in str(violations_by_type).lower() or "trace" in str(violations_by_type).lower():
+            recommendations.append("• **Trace Width Violations**: Increase trace width to meet minimum requirements")
+            recommendations.append("  - Power traces: Use 0.5mm+ width")
+            recommendations.append("  - Signal traces: Minimum 0.15mm")
+        
+        if "via" in str(violations_by_type).lower():
+            recommendations.append("• **Via Violations**: Check via drill size and diameter")
+            recommendations.append("  - Minimum drill: 0.2mm")
+            recommendations.append("  - Via diameter should be 2x drill size")
+        
+        if "unrouted" in str(violations_by_type).lower():
+            recommendations.append("• **Unrouted Nets**: Complete routing for all nets")
+            recommendations.append("  - Use routing suggestions from menu")
+            recommendations.append("  - Check for missing connections")
+        
+        # Component-specific recommendations
+        components_affected = set()
+        for viol in detailed_violations:
+            comp = viol.get("component", "")
+            if comp:
+                components_affected.add(comp)
+        
+        if components_affected:
+            recommendations.append(f"\n• **Affected Components**: {', '.join(sorted(components_affected)[:5])}")
+            recommendations.append("  - Review placement of these components")
+            recommendations.append("  - Consider moving them to resolve violations")
+        
+        if not recommendations:
+            recommendations.append("• Review the detailed DRC report for specific issues")
+            recommendations.append("• Check design rules in Altium Designer")
+            recommendations.append("• Verify component placements and routing")
+        
+        return "\n".join(recommendations) + "\n"
+    
+    def _handle_design_rules_query(self, query: str, all_context: Dict[str, Any]) -> str:
+        """Handle design rules queries - supports specific questions like 'what is minimum trace width?'"""
+        query_lower = query.lower()
+        
+        # Check if asking for specific rule value
+        is_specific_query = any(phrase in query_lower for phrase in [
+            "minimum trace width", "min trace width", "trace width", "minimum width",
+            "what is.*width", "what.*minimum.*width",
+            "minimum clearance", "what is.*clearance", "what.*clearance",
+            "via.*size", "via.*drill", "what is.*via"
+        ])
+        
+        # First, check if PCB is loaded
+        try:
+            import requests
+            pcb_info_response = requests.get("http://localhost:8765/pcb/info", timeout=5)
+            if pcb_info_response.status_code == 200:
+                pcb_data = pcb_info_response.json()
+                if pcb_data.get("error"):
+                    # No PCB loaded
+                    return (
+                        "## Design Rules\n\n"
+                        "**No PCB loaded.**\n\n"
+                        "**To view design rules:**\n"
+                        "1. Load your PCB: Click **📁** → Select `.PcbDoc` file\n"
+                        "2. Or export from Altium: Menu **⋮** → **Export PCB Info**\n"
+                        "3. Then ask me: **`what are the design rules?`**\n\n"
+                        "**Or check in Altium Designer:**\n"
+                        "• **Design → Rules** to view all design rules"
+                    )
+                
+                # PCB is loaded - get rules from PCB info
+                rules = pcb_data.get("rules", [])
+                
+                # Also try to load from Altium export file directly
+                if not rules:
+                    try:
+                        from pathlib import Path
+                        altium_export = Path("altium_pcb_info.json")
+                        if altium_export.exists():
+                            import json
+                            with open(altium_export, 'r', encoding='utf-8') as f:
+                                export_data = json.load(f)
+                                rules = export_data.get('rules', [])
+                    except:
+                        pass
+                
+                # Handle specific queries (e.g., "what is minimum trace width?")
+                if is_specific_query and rules:
+                    # Answer specific question
+                    query_lower = query.lower()
+                    response = "## Design Rule Answer\n\n"
+                    
+                    # Check for trace width queries
+                    if "width" in query_lower or "trace" in query_lower:
+                        width_rules = [r for r in rules if r.get("type") == "width" or "width" in str(r.get("name", "")).lower()]
+                        if width_rules:
+                            min_widths = []
+                            pref_widths = []
+                            for rule in width_rules:
+                                min_w = (rule.get("min_width_mm") or rule.get("minWidth") or rule.get("min_width"))
+                                if isinstance(min_w, (int, float)):
+                                    min_widths.append(min_w)
+                                pref_w = (rule.get("preferred_width_mm") or rule.get("preferredWidth") or rule.get("default_width_mm"))
+                                if isinstance(pref_w, (int, float)):
+                                    pref_widths.append(pref_w)
+                            
+                            if min_widths:
+                                min_val = min(min_widths)
+                                response += f"**Minimum Trace Width**: {min_val}mm\n\n"
+                                if pref_widths:
+                                    pref_val = min(pref_widths)
+                                    response += f"**Preferred Trace Width**: {pref_val}mm\n\n"
+                                response += "**Recommendation:**\n"
+                                response += f"• Use {min_val}mm minimum for signal traces\n"
+                                if pref_widths:
+                                    response += f"• Use {pref_val}mm for standard routing\n"
+                                response += "• Use 0.5mm+ for power traces\n"
+                                return response
+                    
+                    # Check for clearance queries
+                    if "clearance" in query_lower:
+                        clearance_rules = [r for r in rules if r.get("type") == "clearance" or "clearance" in str(r.get("name", "")).lower()]
+                        if clearance_rules:
+                            clearances = []
+                            for rule in clearance_rules:
+                                clearance = (rule.get("min_clearance_mm") or rule.get("clearance_mm") or rule.get("clearance"))
+                                if isinstance(clearance, (int, float)):
+                                    clearances.append(clearance)
+                            
+                            if clearances:
+                                min_clearance = min(clearances)
+                                response += f"**Minimum Clearance**: {min_clearance}mm\n\n"
+                                response += "**This means:**\n"
+                                response += f"• All objects must be at least {min_clearance}mm apart\n"
+                                response += f"• Prevents short circuits and manufacturing issues\n"
+                                return response
+                    
+                    # Check for via queries
+                    if "via" in query_lower:
+                        via_rules = [r for r in rules if r.get("type") == "via" or "via" in str(r.get("name", "")).lower()]
+                        if via_rules:
+                            drills = []
+                            for rule in via_rules:
+                                drill = (rule.get("min_hole_mm") or rule.get("minHoleSize") or rule.get("min_drill"))
+                                if isinstance(drill, (int, float)):
+                                    drills.append(drill)
+                            
+                            if drills:
+                                min_drill = min(drills)
+                                response += f"**Minimum Via Drill Size**: {min_drill}mm\n\n"
+                                response += "**Recommendation:**\n"
+                                response += f"• Via hole should be at least {min_drill}mm\n"
+                                response += f"• Via diameter should be 2x drill size ({min_drill * 2}mm)\n"
+                                return response
+                
+                if rules:
+                    # Use rules from PCB info or export
+                    design_rules = {
+                        "rules": rules,
+                        "statistics": {
+                            "total_rules": len(rules),
+                            "clearance_rules": len([r for r in rules if r.get("type") == "clearance" or "clearance" in str(r.get("name", "")).lower()]),
+                            "width_rules": len([r for r in rules if r.get("type") == "width" or "width" in str(r.get("name", "")).lower()]),
+                            "via_rules": len([r for r in rules if r.get("type") == "via" or "via" in str(r.get("name", "")).lower()])
+                        }
+                    }
+                else:
+                    # PCB loaded but no rules - provide default info
+                    return (
+                        "## Design Rules\n\n"
+                        f"**PCB loaded:** {pcb_data.get('file_name', 'Unknown')}\n\n"
+                        "**Design rules are not available in the current export.**\n\n"
+                        "**To get design rules:**\n"
+                        "1. Export PCB info from Altium: Menu **⋮** → **Export PCB Info**\n"
+                        "2. Design rules will be extracted from the export\n"
+                        "3. Then ask me again: **`what are the design rules?`**\n\n"
+                        "**Or check in Altium Designer:**\n"
+                        "• **Design → Rules** to view all design rules\n\n"
+                        "**Default rules (if not specified):**\n"
+                        "• Clearance: 0.2mm minimum\n"
+                        "• Trace Width: 0.15mm minimum, 0.25mm preferred\n"
+                        "• Via: 0.2mm minimum drill"
+                    )
+            else:
+                # MCP server error - try context
+                design_rules = all_context.get("design_rules") if all_context else None
+                if not design_rules:
+                    return (
+                        "## Design Rules\n\n"
+                        "**Unable to connect to MCP server.**\n\n"
+                        "**To view design rules:**\n"
+                        "1. Make sure MCP server is running\n"
+                        "2. Load your PCB: Click **📁** → Select `.PcbDoc` file\n"
+                        "3. Or check in Altium Designer: **Design → Rules**"
+                    )
+        except Exception as e:
+            # Fallback to context
+            design_rules = all_context.get("design_rules") if all_context else None
+            if not design_rules:
+                return (
+                    "## Design Rules\n\n"
+                    "**Error retrieving design rules.**\n\n"
+                    "**To view design rules:**\n"
+                    "1. Load your PCB: Click **📁** → Select `.PcbDoc` file\n"
+                    "2. Or check in Altium Designer: **Design → Rules**"
+                )
+        
+        # Format design rules response
+        response = "## 📋 Design Rules\n\n"
+        
+        # Get rules data
+        rules = design_rules.get("rules", [])
+        statistics = design_rules.get("statistics", {})
+        
+        if not rules and not statistics:
+            response += "**Default Design Rules** (from Altium export):\n\n"
+            response += "• **Clearance**: 0.2mm (minimum spacing)\n"
+            response += "• **Trace Width**: 0.15mm minimum, 0.25mm preferred\n"
+            response += "• **Via**: 0.2mm minimum drill size\n\n"
+            response += "💡 **To see actual rules from your PCB:**\n"
+            response += "• Export PCB info: Menu **⋮** → **Export PCB Info**\n"
+            response += "• Or check in Altium: **Design → Rules**"
+            return response
+        
+        # Show statistics
+        if statistics:
+            response += "### Summary\n\n"
+            response += f"• **Total Rules**: {statistics.get('total_rules', len(rules))}\n"
+            if statistics.get('clearance_rules', 0) > 0:
+                response += f"• **Clearance Rules**: {statistics.get('clearance_rules', 0)}\n"
+            if statistics.get('width_rules', 0) > 0:
+                response += f"• **Width Rules**: {statistics.get('width_rules', 0)}\n"
+            if statistics.get('via_rules', 0) > 0:
+                response += f"• **Via Rules**: {statistics.get('via_rules', 0)}\n"
+            response += "\n"
+        
+        # Show detailed rules
+        if rules:
+            response += "### Detailed Rules\n\n"
+            
+            # Group by type
+            clearance_rules = [r for r in rules if r.get("type") == "clearance" or "clearance" in str(r.get("name", "")).lower()]
+            width_rules = [r for r in rules if r.get("type") == "traceWidth" or "width" in str(r.get("name", "")).lower()]
+            via_rules = [r for r in rules if r.get("type") == "via" or "via" in str(r.get("name", "")).lower()]
+            
+            if clearance_rules:
+                response += "**Clearance Rules:**\n"
+                for rule in clearance_rules[:5]:  # Show first 5
+                    name = rule.get("name", "Unnamed")
+                    # Try multiple possible field names
+                    min_clearance = (rule.get("min_clearance_mm") or 
+                                   rule.get("clearance_mm") or 
+                                   rule.get("clearance") or 
+                                   "N/A")
+                    if isinstance(min_clearance, (int, float)):
+                        response += f"• **{name}**: {min_clearance}mm minimum clearance\n"
+                    else:
+                        response += f"• **{name}**: {min_clearance}\n"
+                response += "\n"
+            
+            if width_rules:
+                response += "**Trace Width Rules:**\n"
+                for rule in width_rules[:5]:
+                    name = rule.get("name", "Unnamed")
+                    min_w = (rule.get("min_width_mm") or 
+                            rule.get("minWidth") or 
+                            "N/A")
+                    pref_w = (rule.get("preferred_width_mm") or 
+                             rule.get("preferredWidth") or 
+                             rule.get("default_width_mm") or 
+                             "N/A")
+                    if isinstance(min_w, (int, float)) and isinstance(pref_w, (int, float)):
+                        response += f"• **{name}**: Min {min_w}mm, Preferred {pref_w}mm\n"
+                    elif isinstance(min_w, (int, float)):
+                        response += f"• **{name}**: Min {min_w}mm\n"
+                    else:
+                        response += f"• **{name}**: {min_w}\n"
+                response += "\n"
+            
+            if via_rules:
+                response += "**Via Rules:**\n"
+                for rule in via_rules[:5]:
+                    name = rule.get("name", "Unnamed")
+                    min_drill = (rule.get("min_hole_mm") or 
+                               rule.get("minHoleSize") or 
+                               rule.get("min_drill") or 
+                               "N/A")
+                    if isinstance(min_drill, (int, float)):
+                        response += f"• **{name}**: {min_drill}mm minimum drill size\n"
+                    else:
+                        response += f"• **{name}**: {min_drill}\n"
+                response += "\n"
+        
+        # Add helpful note
+        response += "---\n"
+        response += "💡 **To modify design rules:**\n"
+        response += "• In Altium Designer: **Design → Rules**\n"
+        response += "• Then export updated rules: Menu **⋮** → **Export PCB Info**\n"
+        response += "• Ask me: **`what are the design rules?`** to see updated rules"
+        
+        return response
     
     def _handle_artifact_query(self, query: str) -> str:
         """Handle artifact info queries via MCP server"""

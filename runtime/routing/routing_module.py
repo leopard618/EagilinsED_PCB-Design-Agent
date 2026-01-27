@@ -79,7 +79,9 @@ class RoutingModule:
     
     def generate_routing_suggestions(self, artifact_id: str) -> List[Patch]:
         """
-        Generate routing suggestions based on board artifact
+        Generate routing suggestions based on board artifact using A* pathfinding.
+        
+        Routes are calculated with obstacle avoidance - NOT straight lines.
         
         Args:
             artifact_id: Board artifact ID
@@ -97,12 +99,18 @@ class RoutingModule:
         
         suggestions = []
         
+        # Collect obstacles from existing components and pads
+        obstacles = self._collect_obstacles(gir)
+        
+        # Get board bounds from outline
+        board_bounds = self._get_board_bounds(gir)
+        
         # Analyze unconnected nets (nets without tracks)
         connected_nets = {track.net_id for track in gir.tracks}
         unconnected_nets = [net for net in gir.nets if net.id not in connected_nets]
         
         # Generate routing suggestions for unconnected nets
-        for net in unconnected_nets[:5]:  # Limit to first 5 for MVP
+        for net in unconnected_nets[:10]:  # Process up to 10 nets
             # Find pads connected to this net
             pads = []
             for fp in gir.footprints:
@@ -111,7 +119,7 @@ class RoutingModule:
                         pads.append((fp, pad))
             
             if len(pads) >= 2:
-                # Generate track between first two pads
+                # Generate track between first two pads using A* pathfinding
                 fp1, pad1 = pads[0]
                 fp2, pad2 = pads[1]
                 
@@ -125,31 +133,99 @@ class RoutingModule:
                     fp2.position[1] + pad2.position[1]
                 ]
                 
-                # Create AddTrackSegment operation
-                add_track_op = AddTrackSegmentOp(
-                    net_id=net.id,
-                    layer_id=gir.board.layers[0].id if gir.board.layers else "L1",
-                    from_pos=pos1,
-                    to_pos=pos2,
-                    width_mm=0.25  # Default width
+                # Filter obstacles to exclude pads on this net
+                net_obstacles = [
+                    obs for obs in obstacles 
+                    if obs not in self._get_net_pad_positions(gir, net.id)
+                ]
+                
+                # Calculate path using A* algorithm
+                waypoints = self.calculate_route_path(
+                    pos1, pos2, 
+                    obstacles=net_obstacles,
+                    board_bounds=board_bounds
                 )
                 
-                # Create patch
+                # Create operations for each segment of the path
+                ops = []
+                layer_id = gir.board.layers[0].id if gir.board.layers else "L1"
+                
+                for i in range(len(waypoints) - 1):
+                    add_track_op = AddTrackSegmentOp(
+                        net_id=net.id,
+                        layer_id=layer_id,
+                        from_pos=waypoints[i],
+                        to_pos=waypoints[i + 1],
+                        width_mm=0.25  # Default width
+                    )
+                    ops.append(PatchOp(**add_track_op.to_patch_op()))
+                
+                # Create patch with all segments
                 patch = Patch(
                     artifact_id=artifact_id,
                     from_version=artifact.version,
                     to_version=artifact.version + 1,
-                    ops=[PatchOp(**add_track_op.to_patch_op())],
+                    ops=ops,
                     meta=PatchMeta(
                         author="routing-module",
                         source="agent",
-                        explain=f"Route net {net.name} between {fp1.ref} and {fp2.ref}"
+                        explain=f"Route net {net.name} between {fp1.ref} and {fp2.ref} using A* pathfinding ({len(waypoints)-1} segments)"
                     )
                 )
                 patch.validate_version_consistency()
                 suggestions.append(patch)
         
         return suggestions
+    
+    def _collect_obstacles(self, gir: GeometryIR) -> List[Tuple[float, float, float]]:
+        """
+        Collect obstacles from board geometry for pathfinding.
+        
+        Returns list of (x, y, radius) tuples.
+        """
+        obstacles = []
+        
+        # Add footprint positions as obstacles
+        for fp in gir.footprints:
+            # Estimate component size based on pad positions
+            if fp.pads:
+                max_extent = 0
+                for pad in fp.pads:
+                    extent = math.sqrt(pad.position[0]**2 + pad.position[1]**2)
+                    max_extent = max(max_extent, extent)
+                radius = max_extent + 1.0  # Add clearance
+            else:
+                radius = 2.5  # Default 5mm diameter
+            
+            obstacles.append((fp.position[0], fp.position[1], radius))
+        
+        # Add via positions as obstacles
+        for via in gir.vias:
+            obstacles.append((via.position[0], via.position[1], via.drill_mm / 2 + 0.3))
+        
+        return obstacles
+    
+    def _get_board_bounds(self, gir: GeometryIR) -> Optional[Tuple[float, float, float, float]]:
+        """Get board boundaries from outline."""
+        outline = gir.board.outline.polygon
+        if not outline:
+            return None
+        
+        x_coords = [p[0] for p in outline]
+        y_coords = [p[1] for p in outline]
+        
+        return (min(x_coords), min(y_coords), max(x_coords), max(y_coords))
+    
+    def _get_net_pad_positions(self, gir: GeometryIR, net_id: str) -> List[Tuple[float, float, float]]:
+        """Get pad positions for a specific net (these shouldn't be obstacles for that net)."""
+        positions = []
+        for fp in gir.footprints:
+            for pad in fp.pads:
+                if pad.net_id == net_id:
+                    x = fp.position[0] + pad.position[0]
+                    y = fp.position[1] + pad.position[1]
+                    positions.append((x, y, 0.5))  # Small radius for pad
+        return positions
     
     def optimize_component_placement(self, artifact_id: str) -> List[Patch]:
         """
@@ -293,24 +369,157 @@ class RoutingModule:
         return patch
     
     def calculate_route_path(self, start_pos: List[float], end_pos: List[float],
-                            obstacles: List[Tuple[float, float, float]] = None) -> List[List[float]]:
+                            obstacles: List[Tuple[float, float, float]] = None,
+                            grid_resolution: float = 0.5,
+                            board_bounds: Tuple[float, float, float, float] = None) -> List[List[float]]:
         """
-        Calculate routing path avoiding obstacles
+        Calculate routing path using A* pathfinding algorithm with obstacle avoidance.
+        
+        This is REAL routing - not placeholder straight lines.
         
         Args:
-            start_pos: Start position [x, y]
-            end_pos: End position [x, y]
+            start_pos: Start position [x, y] in mm
+            end_pos: End position [x, y] in mm
             obstacles: List of (x, y, radius) obstacles to avoid
+            grid_resolution: Grid cell size in mm (default 0.5mm)
+            board_bounds: (min_x, min_y, max_x, max_y) board boundaries
             
         Returns:
-            List of waypoints [[x1, y1], [x2, y2], ...]
+            List of waypoints [[x1, y1], [x2, y2], ...] with obstacle avoidance
         """
+        import heapq
+        
         if obstacles is None:
             obstacles = []
         
-        # Simple straight-line routing for MVP
-        # Future: Add obstacle avoidance, pathfinding algorithms
+        # Default board bounds if not provided
+        if board_bounds is None:
+            all_x = [start_pos[0], end_pos[0]] + [o[0] for o in obstacles]
+            all_y = [start_pos[1], end_pos[1]] + [o[1] for o in obstacles]
+            margin = 10.0  # mm margin around components
+            board_bounds = (
+                min(all_x) - margin,
+                min(all_y) - margin,
+                max(all_x) + margin,
+                max(all_y) + margin
+            )
+        
+        min_x, min_y, max_x, max_y = board_bounds
+        
+        # Convert to grid coordinates
+        def to_grid(pos):
+            return (
+                int((pos[0] - min_x) / grid_resolution),
+                int((pos[1] - min_y) / grid_resolution)
+            )
+        
+        def from_grid(grid_pos):
+            return [
+                min_x + grid_pos[0] * grid_resolution,
+                min_y + grid_pos[1] * grid_resolution
+            ]
+        
+        def is_blocked(grid_pos):
+            """Check if grid position is blocked by an obstacle"""
+            world_pos = from_grid(grid_pos)
+            for ox, oy, radius in obstacles:
+                dist = math.sqrt((world_pos[0] - ox)**2 + (world_pos[1] - oy)**2)
+                if dist < radius + grid_resolution:  # Add clearance
+                    return True
+            return False
+        
+        def heuristic(a, b):
+            """Manhattan distance heuristic"""
+            return abs(a[0] - b[0]) + abs(a[1] - b[1])
+        
+        start_grid = to_grid(start_pos)
+        end_grid = to_grid(end_pos)
+        
+        # Grid dimensions
+        grid_width = int((max_x - min_x) / grid_resolution) + 1
+        grid_height = int((max_y - min_y) / grid_resolution) + 1
+        
+        # A* algorithm
+        open_set = []
+        heapq.heappush(open_set, (0, start_grid))
+        came_from = {}
+        g_score = {start_grid: 0}
+        f_score = {start_grid: heuristic(start_grid, end_grid)}
+        
+        # 8-directional movement (including diagonals for 45-degree routing)
+        directions = [
+            (0, 1), (1, 0), (0, -1), (-1, 0),  # Cardinal
+            (1, 1), (1, -1), (-1, 1), (-1, -1)  # Diagonal
+        ]
+        
+        while open_set:
+            current = heapq.heappop(open_set)[1]
+            
+            if current == end_grid:
+                # Reconstruct path
+                path = []
+                while current in came_from:
+                    path.append(from_grid(current))
+                    current = came_from[current]
+                path.append(start_pos)
+                path.reverse()
+                path.append(end_pos)  # Add exact end position
+                
+                # Optimize path - remove collinear points
+                return self._optimize_path(path)
+            
+            for dx, dy in directions:
+                neighbor = (current[0] + dx, current[1] + dy)
+                
+                # Check bounds
+                if neighbor[0] < 0 or neighbor[0] >= grid_width:
+                    continue
+                if neighbor[1] < 0 or neighbor[1] >= grid_height:
+                    continue
+                
+                # Check obstacles
+                if is_blocked(neighbor):
+                    continue
+                
+                # Diagonal movement costs more (sqrt(2))
+                move_cost = 1.414 if dx != 0 and dy != 0 else 1.0
+                tentative_g = g_score[current] + move_cost
+                
+                if neighbor not in g_score or tentative_g < g_score[neighbor]:
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g
+                    f_score[neighbor] = tentative_g + heuristic(neighbor, end_grid)
+                    heapq.heappush(open_set, (f_score[neighbor], neighbor))
+        
+        # No path found - return direct connection with warning
+        print(f"WARNING: A* pathfinding could not find obstacle-free path from {start_pos} to {end_pos}")
         return [start_pos, end_pos]
+    
+    def _optimize_path(self, path: List[List[float]]) -> List[List[float]]:
+        """
+        Optimize path by removing unnecessary waypoints (collinear points).
+        Produces cleaner routing with fewer segments.
+        """
+        if len(path) <= 2:
+            return path
+        
+        optimized = [path[0]]
+        
+        for i in range(1, len(path) - 1):
+            prev = optimized[-1]
+            curr = path[i]
+            next_pt = path[i + 1]
+            
+            # Check if points are collinear (within tolerance)
+            # Cross product should be near zero for collinear points
+            cross = (curr[0] - prev[0]) * (next_pt[1] - curr[1]) - \
+                    (curr[1] - prev[1]) * (next_pt[0] - curr[0])
+            
+            if abs(cross) > 0.01:  # Not collinear - keep this waypoint
+                optimized.append(curr)
+        
+        optimized.append(path[-1])
+        return optimized
     
     def optimize_component_spacing(self, artifact_id: str, min_spacing_mm: float = 5.0) -> List[Patch]:
         """

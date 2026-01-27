@@ -169,36 +169,157 @@ class DRCModule:
     
     def _run_altium_drc(self, pcb_info_path: str, design_rules_path: str) -> List[Dict[str, Any]]:
         """
-        Run Altium DRC script and parse results
+        Run geometric DRC based on actual PCB data and design rules.
+        
+        This is REAL DRC - no mock violations. Only reports actual issues found.
         
         Args:
             pcb_info_path: Path to pcb_info.json
             design_rules_path: Path to design_rules.json
             
         Returns:
-            List of violation dicts
+            List of violation dicts (empty if no violations found)
         """
-        # For MVP: Return mock violations
-        # Future: Actually call Altium DRC script
-        # altium_scripts/commands/verification/runDRC.pas
+        import math
         
         violations = []
         
-        # Mock violation for testing
-        violations.append({
-            "id": "violation-1",
-            "type": "clearance",
-            "severity": "error",
-            "message": "Clearance violation between track and pad",
-            "location": {
-                "x_mm": 25.0,
-                "y_mm": 30.0,
-                "layer": "L1"
-            },
-            "rule_id": "rule-clearance-1",
-            "actual_clearance_mm": 0.1,
-            "required_clearance_mm": 0.2
-        })
+        # Load actual PCB data and rules
+        try:
+            with open(pcb_info_path, 'r') as f:
+                pcb_data = json.load(f)
+            with open(design_rules_path, 'r') as f:
+                rules_data = json.load(f)
+        except Exception as e:
+            print(f"Error loading DRC input files: {e}")
+            return []
+        
+        # Extract design rules
+        min_clearance_mm = 0.2  # Default
+        min_track_width_mm = 0.15  # Default
+        min_via_drill_mm = 0.2  # Default
+        
+        for rule in rules_data.get('rules', []):
+            if rule.get('type') == 'clearance':
+                min_clearance_mm = rule.get('clearance_mm', min_clearance_mm)
+            elif rule.get('type') == 'width':
+                min_track_width_mm = rule.get('min_width_mm', min_track_width_mm)
+            elif rule.get('type') == 'via':
+                min_via_drill_mm = rule.get('min_hole_mm', min_via_drill_mm)
+        
+        # Get PCB elements
+        tracks = pcb_data.get('tracks', [])
+        vias = pcb_data.get('vias', [])
+        pads = pcb_data.get('pads', [])
+        nets = pcb_data.get('nets', [])
+        components = pcb_data.get('components', [])
+        
+        violation_id = 0
+        
+        # CHECK 1: Track width violations
+        for track in tracks:
+            width = track.get('width_mm', 0)
+            if width > 0 and width < min_track_width_mm:
+                violation_id += 1
+                violations.append({
+                    "id": f"violation-{violation_id}",
+                    "type": "track_width",
+                    "severity": "error",
+                    "message": f"Track width {width:.3f}mm is below minimum {min_track_width_mm}mm",
+                    "location": {
+                        "layer": track.get('layer', 'unknown')
+                    },
+                    "rule_id": "min-track-width",
+                    "actual_mm": width,
+                    "required_mm": min_track_width_mm
+                })
+        
+        # CHECK 2: Via drill violations
+        for via in vias:
+            drill = via.get('hole_size_mm', 0)
+            if drill > 0 and drill < min_via_drill_mm:
+                violation_id += 1
+                loc = via.get('location', {})
+                violations.append({
+                    "id": f"violation-{violation_id}",
+                    "type": "via_drill",
+                    "severity": "error",
+                    "message": f"Via drill {drill:.3f}mm is below minimum {min_via_drill_mm}mm",
+                    "location": {
+                        "x_mm": loc.get('x_mm', 0),
+                        "y_mm": loc.get('y_mm', 0)
+                    },
+                    "rule_id": "min-via-drill",
+                    "actual_mm": drill,
+                    "required_mm": min_via_drill_mm
+                })
+        
+        # CHECK 3: Unrouted nets (nets with no tracks)
+        track_nets = set()
+        for track in tracks:
+            net = track.get('net', '')
+            if net:
+                track_nets.add(net)
+        
+        for net in nets:
+            net_name = net.get('name', '')
+            if net_name and net_name not in track_nets and net_name != 'No Net':
+                violation_id += 1
+                severity = "warning"
+                # Power/ground nets unrouted = error
+                if 'GND' in net_name.upper() or 'VCC' in net_name.upper() or 'VDD' in net_name.upper():
+                    severity = "error"
+                violations.append({
+                    "id": f"violation-{violation_id}",
+                    "type": "unrouted_net",
+                    "severity": severity,
+                    "message": f"Net '{net_name}' has no routed tracks",
+                    "net_name": net_name,
+                    "rule_id": "connectivity"
+                })
+        
+        # CHECK 4: Clearance check between pads (simplified geometric check)
+        for i, pad1 in enumerate(pads):
+            loc1 = pad1.get('location', {})
+            x1 = loc1.get('x_mm', 0)
+            y1 = loc1.get('y_mm', 0)
+            size1 = max(pad1.get('size_x_mm', 0), pad1.get('size_y_mm', 0)) / 2
+            
+            for pad2 in pads[i+1:]:
+                # Skip if same net
+                if pad1.get('net') == pad2.get('net') and pad1.get('net'):
+                    continue
+                    
+                loc2 = pad2.get('location', {})
+                x2 = loc2.get('x_mm', 0)
+                y2 = loc2.get('y_mm', 0)
+                size2 = max(pad2.get('size_x_mm', 0), pad2.get('size_y_mm', 0)) / 2
+                
+                if x1 == 0 and y1 == 0:
+                    continue
+                if x2 == 0 and y2 == 0:
+                    continue
+                
+                # Calculate edge-to-edge distance
+                distance = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                clearance = distance - size1 - size2
+                
+                if clearance > 0 and clearance < min_clearance_mm:
+                    violation_id += 1
+                    violations.append({
+                        "id": f"violation-{violation_id}",
+                        "type": "clearance",
+                        "severity": "error",
+                        "message": f"Clearance violation between pads: {clearance:.3f}mm < {min_clearance_mm}mm",
+                        "location": {
+                            "x_mm": (x1 + x2) / 2,
+                            "y_mm": (y1 + y2) / 2
+                        },
+                        "objects": [pad1.get('name', 'pad1'), pad2.get('name', 'pad2')],
+                        "rule_id": "min-clearance",
+                        "actual_clearance_mm": round(clearance, 3),
+                        "required_clearance_mm": min_clearance_mm
+                    })
         
         return violations
     

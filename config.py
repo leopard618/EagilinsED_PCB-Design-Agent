@@ -8,7 +8,11 @@ load_dotenv()
 
 # OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
+# Recommended models (2025-2026):
+# - gpt-4o: Best for PCB analysis (fast, capable)
+# - gpt-4o-mini: Cheaper alternative
+# - o1-mini: For complex reasoning tasks
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 # MCP Configuration
 # Default port 8765 for new Python-based MCP server

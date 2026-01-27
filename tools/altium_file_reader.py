@@ -156,40 +156,32 @@ class AltiumFileReader:
         except Exception as e:
             print(f"Error parsing nets: {e}")
         
-        # Parse Tracks6/Data for track info
+        # Parse Tracks6/Data for track info - NO TRUNCATION
         try:
             if ole.exists('Tracks6/Data'):
                 data = ole.openstream('Tracks6/Data').read()
                 tracks = self._parse_track_records(data)
-                result["tracks"] = tracks[:50]  # Limit for performance
-                # For binary data, estimate count from data size
-                if len(tracks) == 0 or (len(tracks) > 0 and tracks[0].get('type') == 'binary_record'):
-                    result["statistics"]["track_count"] = self._count_binary_records(data, 36)
-                else:
-                    result["statistics"]["track_count"] = len(tracks)
+                result["tracks"] = tracks  # Full data, no truncation
+                result["statistics"]["track_count"] = len(tracks)
         except Exception as e:
             print(f"Error parsing tracks: {e}")
         
-        # Parse Vias6/Data for via info
+        # Parse Vias6/Data for via info - NO TRUNCATION
         try:
             if ole.exists('Vias6/Data'):
                 data = ole.openstream('Vias6/Data').read()
                 vias = self._parse_via_records(data)
-                result["vias"] = vias[:50]  # Limit for performance
-                # For binary data, estimate count from data size
-                if len(vias) == 0 or (len(vias) > 0 and vias[0].get('type') == 'binary_record'):
-                    result["statistics"]["via_count"] = self._count_binary_records(data, 24)
-                else:
-                    result["statistics"]["via_count"] = len(vias)
+                result["vias"] = vias  # Full data, no truncation
+                result["statistics"]["via_count"] = len(vias)
         except Exception as e:
             print(f"Error parsing vias: {e}")
         
-        # Parse Pads6/Data for pad info
+        # Parse Pads6/Data for pad info - NO TRUNCATION
         try:
             if ole.exists('Pads6/Data'):
                 data = ole.openstream('Pads6/Data').read()
                 pads = self._parse_pad_records(data)
-                result["pads"] = pads[:50]  # Limit for performance
+                result["pads"] = pads  # Full data, no truncation
                 result["statistics"]["pad_count"] = len(pads)
         except Exception as e:
             print(f"Error parsing pads: {e}")
@@ -271,6 +263,7 @@ class AltiumFileReader:
             }
             
             # Look for layer definitions in the data
+            # Try multiple patterns Altium uses for layer storage
             for key, value in pairs.items():
                 if key.startswith('V9_LAYERID'):
                     # Extract layer info
@@ -281,14 +274,37 @@ class AltiumFileReader:
                             "name": layer_match.group(1)
                         })
             
-            # If no layers found, add default 4-layer stack
+            # Try alternative layer patterns if V9_LAYERID not found
             if not layers:
-                layers = [
-                    {"id": "L1", "name": "Top", "kind": "signal"},
-                    {"id": "L2", "name": "GND", "kind": "ground"},
-                    {"id": "L3", "name": "VCC", "kind": "power"},
-                    {"id": "L4", "name": "Bottom", "kind": "signal"}
-                ]
+                # Look for LAYER patterns in the data
+                layer_pattern = re.findall(r'LAYER(\d+)NAME=([^|]+)', text)
+                for layer_num, layer_name in layer_pattern:
+                    layers.append({
+                        "id": f"L{layer_num}",
+                        "name": layer_name
+                    })
+            
+            # Try LAYERV7 patterns (older format)
+            if not layers:
+                for i in range(1, 33):  # Altium supports up to 32 layers
+                    key = f'LAYERV7_{i}_NAME'
+                    if key in pairs:
+                        layers.append({
+                            "id": f"L{i}",
+                            "name": pairs[key]
+                        })
+            
+            # If still no layers found, check for basic TOPLAYER/BOTTOMLAYER
+            if not layers:
+                if 'TOPLAYER' in pairs or 'TOPNAME' in pairs:
+                    layers.append({"id": "L1", "name": pairs.get('TOPNAME', 'Top'), "kind": "signal"})
+                if 'BOTTOMLAYER' in pairs or 'BOTTOMNAME' in pairs:
+                    layers.append({"id": "L2", "name": pairs.get('BOTTOMNAME', 'Bottom'), "kind": "signal"})
+            
+            # NO FABRICATED DEFAULT LAYERS - only return what we actually found
+            # If no layers detected, return empty list with warning
+            if not layers:
+                print("WARNING: No layer information found in PCB file")
             
             return {
                 "board_size": {
@@ -305,29 +321,33 @@ class AltiumFileReader:
     def _parse_component_records_detailed(self, data: bytes) -> List[Dict[str, Any]]:
         """Parse detailed component data from binary stream."""
         components = []
+        seen_designators = set()  # Avoid duplicates
+        
         try:
             text = data.decode('latin-1', errors='ignore')
             
-            # Altium uses null bytes or special chars as record separators
-            # Split by common record patterns
-            # Look for SOURCEDESIGNATOR which marks component entries
+            # Altium Components6/Data format:
+            # Each component record starts with |UNICODE=EXISTS| 
+            # followed by |KEY=VALUE| pairs including X, Y, PATTERN, LAYER, SOURCEDESIGNATOR, etc.
+            # Split on |UNICODE=EXISTS| to get individual records
             
-            # Split by binary record separator (usually 0x00 sequences or specific patterns)
-            records = re.split(r'[\x00-\x02]+', text)
+            records = text.split('|UNICODE=EXISTS|')
             
             for record in records:
-                if 'SOURCEDESIGNATOR=' not in record and 'PATTERN=' not in record:
+                # Skip records without component data
+                if 'SOURCEDESIGNATOR=' not in record:
                     continue
                 
+                # Parse all key-value pairs from the record
                 pairs = self._parse_key_value_pairs(record)
                 
-                # Extract component designator (try multiple possible keys)
-                designator = pairs.get('SOURCEDESIGNATOR', 
-                             pairs.get('DESIGNITEMID', 
-                             pairs.get('NAME', '')))
+                # Extract component designator
+                designator = pairs.get('SOURCEDESIGNATOR', '')
                 
-                if not designator:
+                if not designator or designator in seen_designators:
                     continue
+                
+                seen_designators.add(designator)
                 
                 # Parse X/Y coordinates (can be in mil or internal units)
                 x_str = pairs.get('X', '0')
@@ -352,17 +372,18 @@ class AltiumFileReader:
                     "footprint": pairs.get('PATTERN', ''),
                     "layer": pairs.get('LAYER', 'TOP').title(),
                     "location": {
-                        "x_mm": round(x_mm, 2),
-                        "y_mm": round(y_mm, 2)
+                        "x_mm": round(x_mm, 4),
+                        "y_mm": round(y_mm, 4)
                     },
                     "rotation_degrees": round(rotation, 1),
                     "comment": pairs.get('COMMENT', ''),
                     "description": pairs.get('SOURCEDESCRIPTION', ''),
                     "value": pairs.get('COMMENT', ''),
                     "locked": pairs.get('LOCKED', 'FALSE') == 'TRUE',
-                    "height_mm": round(height_mm, 2),
+                    "height_mm": round(height_mm, 4),
                     "library": pairs.get('SOURCECOMPONENTLIBRARY', ''),
-                    "lib_reference": pairs.get('SOURCELIBREFERENCE', '')
+                    "lib_reference": pairs.get('SOURCELIBREFERENCE', ''),
+                    "unique_id": pairs.get('UNIQUEID', '')
                 }
                 
                 # Clean up empty fields
@@ -469,8 +490,8 @@ class AltiumFileReader:
                 if count == 0:
                     count = len(data) // 36  # Estimate based on typical record size
                 
-                # Create summary entries
-                for i in range(min(count, 50)):
+                # Create entries for ALL binary records - NO TRUNCATION
+                for i in range(count):
                     tracks.append({
                         "id": f"track-{i+1}",
                         "type": "binary_record"
@@ -522,9 +543,9 @@ class AltiumFileReader:
                     if via["hole_size_mm"] > 0 or via["diameter_mm"] > 0:
                         vias.append(via)
             else:
-                # Binary format - estimate count
+                # Binary format - estimate count - NO TRUNCATION
                 count = self._count_binary_records(data, 24)
-                for i in range(min(count, 50)):
+                for i in range(count):
                     vias.append({"id": f"via-{i+1}", "type": "binary_record"})
                     
         except Exception as e:
