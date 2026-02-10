@@ -195,6 +195,51 @@ class AltiumFileReader:
         except Exception as e:
             print(f"Error parsing rules: {e}")
         
+        # Parse Polygons6/Data for polygon/pour data
+        try:
+            if ole.exists('Polygons6/Data'):
+                data = ole.openstream('Polygons6/Data').read()
+                polygons = self._parse_polygon_records(data)
+                result["polygons"] = polygons
+                result["statistics"]["polygon_count"] = len(polygons)
+        except Exception as e:
+            print(f"Error parsing polygons: {e}")
+            result["polygons"] = []
+        
+        # Parse Regions6/Data for region data (alternative polygon format)
+        try:
+            if ole.exists('Regions6/Data'):
+                data = ole.openstream('Regions6/Data').read()
+                regions = self._parse_region_records(data)
+                if "polygons" not in result or not result["polygons"]:
+                    result["polygons"] = []
+                result["polygons"].extend(regions)
+                result["statistics"]["polygon_count"] = len(result.get("polygons", []))
+        except Exception as e:
+            print(f"Error parsing regions: {e}")
+        
+        # Extract silk screen data from components (if available)
+        try:
+            # Try to get silk screen info from component footprints
+            for comp in result.get("components", []):
+                if isinstance(comp, dict):
+                    # Estimate silk screen bounds from component location and size
+                    comp_loc = comp.get("location", {})
+                    if comp_loc:
+                        # Create estimated silk screen rectangle
+                        # This is a simplified approach - full implementation would need footprint library data
+                        comp["silk_screen"] = {
+                            "bounds": {
+                                "x_min": comp_loc.get("x_mm", 0) - 2.5,
+                                "x_max": comp_loc.get("x_mm", 0) + 2.5,
+                                "y_min": comp_loc.get("y_mm", 0) - 2.5,
+                                "y_max": comp_loc.get("y_mm", 0) + 2.5
+                            },
+                            "layer": comp.get("layer", "Top")
+                        }
+        except Exception as e:
+            print(f"Error extracting silk screen data: {e}")
+        
         # Get file metadata
         result["metadata"] = {
             "streams": len(streams),
@@ -214,11 +259,40 @@ class AltiumFileReader:
         return pairs
     
     def _convert_coord(self, value_str: str) -> float:
-        """Convert Altium coordinate string to mm."""
+        """Convert Altium coordinate string to mm (handles mil, mm, or internal units)."""
         try:
-            # Altium stores coordinates in internal units (0.01 mil = 0.254 um)
-            value = int(value_str)
-            return round(value * self.UNITS_TO_MM, 4)
+            value_str = str(value_str).strip()
+            if not value_str or value_str == '0':
+                return 0.0
+            
+            # Remove any non-printable characters (binary data that sometimes follows values)
+            # Keep only printable ASCII characters
+            import string
+            value_str = ''.join(c for c in value_str if c in string.printable).strip()
+            
+            # Handle units: mil, mm, or internal units
+            if 'mil' in value_str.lower():
+                # Extract number before 'mil' (handles "33mil" or "33mil" + binary)
+                mil_match = re.search(r'([0-9.]+)\s*mil', value_str, re.IGNORECASE)
+                if mil_match:
+                    return round(float(mil_match.group(1)) * 0.0254, 4)
+            elif 'mm' in value_str.lower():
+                # Extract number before 'mm'
+                mm_match = re.search(r'([0-9.]+)\s*mm', value_str, re.IGNORECASE)
+                if mm_match:
+                    return round(float(mm_match.group(1)), 4)
+            
+            # Try as internal units or raw number
+            # Remove any non-numeric characters except decimal point and minus sign
+            numeric_str = re.sub(r'[^0-9.\-]', '', value_str)
+            if numeric_str:
+                value = float(numeric_str)
+                # If it's a very large number, it's probably internal units
+                if abs(value) > 100000:
+                    return round(value * self.UNITS_TO_MM, 4)
+                else:
+                    # Assume mils for reasonable-sized numbers (common in rules)
+                    return round(value * 0.0254, 4)
         except:
             return 0.0
     
@@ -591,12 +665,42 @@ class AltiumFileReader:
         rules = []
         try:
             text = data.decode('latin-1', errors='ignore')
-            records = text.split('|RECORD=')
             
-            for record in records[1:]:
-                pairs = self._parse_key_value_pairs('|RECORD=' + record)
+            # Rules are separated by |NAME= markers (each rule has a NAME field)
+            # Split by |NAME= to find rule boundaries
+            # But we need to be careful - some fields might contain |NAME= in their values
+            # Better approach: find all |NAME= occurrences and extract the rule name, then parse backwards/forwards
+            
+            # Alternative: Look for |RULEKIND= as rule markers (each rule has one)
+            # Records appear to be separated by binary length prefixes, but we can find them by |RULEKIND=
+            
+            # Split by |RULEKIND= to find rule boundaries
+            parts = text.split('|RULEKIND=')
+            
+            for i, part in enumerate(parts[1:], 1):  # Skip first empty part
+                # This part contains a rule - parse it
+                # The rule kind is the first value after |RULEKIND=
+                rule_kind_end = part.find('|')
+                if rule_kind_end == -1:
+                    rule_kind = part.strip()
+                else:
+                    rule_kind = part[:rule_kind_end].strip()
                 
-                rule_kind = pairs.get('RULEKIND', '')
+                # Limit this record to avoid including the next rule
+                # Find the next |RULEKIND= marker (if this isn't the last part)
+                if i < len(parts) - 1:
+                    # There's a next rule - limit to reasonable length or next marker
+                    # But we already split, so just take up to a reasonable max length
+                    # (records are typically < 2000 chars)
+                    record_text = part[:5000]  # Limit to 5000 chars per record
+                else:
+                    record_text = part
+                
+                # Now parse all key-value pairs in this record
+                # Add back the RULEKIND= prefix for parsing
+                full_record = '|RULEKIND=' + record_text
+                pairs = self._parse_key_value_pairs(full_record)
+                
                 rule_name = pairs.get('NAME', '')
                 
                 if not rule_name:
@@ -611,18 +715,122 @@ class AltiumFileReader:
                 }
                 
                 # Extract specific rule values based on kind
-                if 'CLEARANCE' in rule_kind.upper():
-                    rule["clearance_mm"] = self._convert_coord(pairs.get('GAP', '0'))
+                # Check specific rule kinds first (more specific before general)
+                rule_kind_upper = rule_kind.upper()
+                
+                # Check for PLANE rules BEFORE general CLEARANCE (PlaneClearance is a specific type)
+                if 'PLANE' in rule_kind_upper and 'CLEARANCE' in rule_kind_upper:
+                    # Plane Clearance rules - uses CLEARANCE key (not GENERICCLEARANCE)
+                    clearance_value = pairs.get('CLEARANCE', '0') or pairs.get('GAP', '0')
+                    rule["clearance_mm"] = self._convert_coord(clearance_value)
+                    rule["type"] = "plane_clearance"
+                elif 'CLEARANCE' in rule_kind_upper:
+                    # General Clearance rules
+                    gap_value = pairs.get('GENERICCLEARANCE', '0') or pairs.get('GAP', '0') or pairs.get('MINIMUMGAP', '0') or pairs.get('CLEARANCE', '0')
+                    rule["clearance_mm"] = self._convert_coord(gap_value)
                     rule["type"] = "clearance"
-                elif 'WIDTH' in rule_kind.upper():
-                    rule["min_width_mm"] = self._convert_coord(pairs.get('MINWIDTH', '0'))
-                    rule["max_width_mm"] = self._convert_coord(pairs.get('MAXWIDTH', '0'))
-                    rule["preferred_width_mm"] = self._convert_coord(pairs.get('PREFEREDWIDTH', '0'))
-                    rule["type"] = "width"
-                elif 'VIA' in rule_kind.upper():
-                    rule["min_hole_mm"] = self._convert_coord(pairs.get('MINHOLE', '0'))
-                    rule["max_hole_mm"] = self._convert_coord(pairs.get('MAXHOLE', '0'))
+                elif 'ROUTINGVIAS' in rule_kind_upper or 'VIASTYLE' in rule_kind_upper:
+                    # Routing Via Style rules - Altium uses HOLEWIDTH, WIDTH, MINHOLEWIDTH, MINWIDTH, MAXHOLEWIDTH, MAXWIDTH
+                    rule["min_hole_mm"] = self._convert_coord(pairs.get('MINHOLEWIDTH', '0') or pairs.get('MINHOLE', '0'))
+                    rule["max_hole_mm"] = self._convert_coord(pairs.get('MAXHOLEWIDTH', '0') or pairs.get('MAXHOLE', '0'))
+                    rule["preferred_hole_mm"] = self._convert_coord(pairs.get('HOLEWIDTH', '0') or pairs.get('PREFEREDHOLE', '0'))
+                    rule["min_diameter_mm"] = self._convert_coord(pairs.get('MINWIDTH', '0') or pairs.get('MINDIAMETER', '0'))
+                    rule["max_diameter_mm"] = self._convert_coord(pairs.get('MAXWIDTH', '0') or pairs.get('MAXDIAMETER', '0'))
+                    rule["preferred_diameter_mm"] = self._convert_coord(pairs.get('WIDTH', '0') or pairs.get('PREFERREDDIAMETER', '0'))
+                    rule["via_style"] = pairs.get('VIASTYLE', '')
                     rule["type"] = "via"
+                elif 'ROUTINGCORNERS' in rule_kind_upper:
+                    # Routing Corners rules - Altium uses CORNERSTYLE, MINSETBACK, MAXSETBACK
+                    rule["corner_style"] = pairs.get('CORNERSTYLE', '') or pairs.get('STYLE', '')
+                    rule["setback_mm"] = self._convert_coord(pairs.get('MINSETBACK', '0') or pairs.get('SETBACK', '0'))
+                    rule["setback_to_mm"] = self._convert_coord(pairs.get('MAXSETBACK', '0') or pairs.get('SETBACKTO', '0'))
+                    rule["type"] = "routing_corners"
+                elif 'ROUTINGTOPOLOGY' in rule_kind_upper:
+                    # Routing Topology rules
+                    topology = pairs.get('TOPOLOGY', '') or pairs.get('TOPOLOGYTYPE', '')
+                    # Clean topology string (remove binary characters)
+                    if topology:
+                        topology = re.sub(r'[\x00-\x1F\x7F-\xFF]', '', topology).strip()
+                    rule["topology"] = topology
+                    rule["type"] = "routing_topology"
+                elif 'ROUTINGPRIORITY' in rule_kind_upper:
+                    # Routing Priority rules
+                    rule["priority_value"] = int(pairs.get('PRIORITYVALUE', '0') or pairs.get('PRIORITY', '0'))
+                    rule["type"] = "routing_priority"
+                elif 'ROUTINGLAYERS' in rule_kind_upper:
+                    # Routing Layers rules
+                    rule["type"] = "routing_layers"
+                elif 'DIFFPAIRS' in rule_kind_upper or 'DIFFERENTIAL' in rule_kind_upper:
+                    # Differential Pairs Routing rules
+                    # Use TOPLAYER values as primary (most common)
+                    rule["min_width_mm"] = self._convert_coord(pairs.get('TOPLAYER_MINWIDTH', '0') or pairs.get('MINLIMIT', '0') or pairs.get('MINWIDTH', '0'))
+                    rule["max_width_mm"] = self._convert_coord(pairs.get('TOPLAYER_MAXWIDTH', '0') or pairs.get('MAXLIMIT', '0') or pairs.get('MAXWIDTH', '0'))
+                    rule["preferred_width_mm"] = self._convert_coord(pairs.get('TOPLAYER_PREFWIDTH', '0') or pairs.get('PREFERREDWIDTH', '0'))
+                    # Gap values - MINLIMIT and MAXLIMIT are often used for gap, MOSTFREQGAP is preferred gap
+                    rule["min_gap_mm"] = self._convert_coord(pairs.get('MINGAP', '0') or pairs.get('MINLIMIT', '0'))
+                    rule["max_gap_mm"] = self._convert_coord(pairs.get('MAXGAP', '0') or pairs.get('MAXLIMIT', '0'))
+                    rule["preferred_gap_mm"] = self._convert_coord(pairs.get('MOSTFREQGAP', '0') or pairs.get('PREFERREDGAP', '0'))
+                    # Max uncoupled length
+                    rule["max_uncoupled_length_mm"] = self._convert_coord(pairs.get('MAXUNCOUPLEDLENGTH', '0') or pairs.get('MAXLENGTH', '0'))
+                    rule["type"] = "diff_pairs_routing"
+                elif 'WIDTH' in rule_kind_upper:
+                    # Width rules - Altium uses MINLIMIT, MAXLIMIT, PREFEREDWIDTH
+                    rule["min_width_mm"] = self._convert_coord(pairs.get('MINLIMIT', '0') or pairs.get('MINWIDTH', '0') or pairs.get('MINIMUMWIDTH', '0'))
+                    rule["max_width_mm"] = self._convert_coord(pairs.get('MAXLIMIT', '0') or pairs.get('MAXWIDTH', '0') or pairs.get('MAXIMUMWIDTH', '0'))
+                    rule["preferred_width_mm"] = self._convert_coord(pairs.get('PREFEREDWIDTH', '0') or pairs.get('PREFERREDWIDTH', '0'))
+                    rule["type"] = "width"
+                elif 'VIA' in rule_kind_upper and 'ROUTING' not in rule_kind_upper:
+                    # Via rules (not routing-related)
+                    rule["min_hole_mm"] = self._convert_coord(pairs.get('MINHOLE', '0') or pairs.get('MINIMUMHOLE', '0'))
+                    rule["max_hole_mm"] = self._convert_coord(pairs.get('MAXHOLE', '0') or pairs.get('MAXIMUMHOLE', '0'))
+                    rule["min_diameter_mm"] = self._convert_coord(pairs.get('MINDIAMETER', '0') or pairs.get('MINIMUMDIAMETER', '0'))
+                    rule["max_diameter_mm"] = self._convert_coord(pairs.get('MAXDIAMETER', '0') or pairs.get('MAXIMUMDIAMETER', '0'))
+                    rule["type"] = "via"
+                elif 'SHORT' in rule_kind_upper or 'SHORTCIRCUIT' in rule_kind_upper:
+                    # Short Circuit rules
+                    rule["allowed"] = pairs.get('ALLOWED', 'FALSE') == 'TRUE'
+                    rule["type"] = "short_circuit"
+                elif 'MASK' in rule_kind_upper:
+                    # Mask rules - Altium uses EXPANSION key
+                    expansion_top = self._convert_coord(pairs.get('EXPANSION', '0') or pairs.get('EXPANSIONTOP', '0'))
+                    expansion_bottom = self._convert_coord(pairs.get('EXPANSIONBOTTOM', '0'))
+                    # If bottom expansion is not specified, use top expansion (common in Altium)
+                    if expansion_bottom == 0.0 and expansion_top > 0:
+                        expansion_bottom = expansion_top
+                    rule["expansion_mm"] = expansion_top
+                    rule["expansion_bottom_mm"] = expansion_bottom
+                    # Check for tenting flags
+                    rule["tented_top"] = pairs.get('ISTENTINGTOP', 'FALSE') == 'TRUE'
+                    rule["tented_bottom"] = pairs.get('ISTENTINGBOTTOM', 'FALSE') == 'TRUE'
+                    # Paste mask specific settings
+                    if 'PASTE' in rule_kind_upper:
+                        rule["use_paste_smd"] = pairs.get('USEPASTE', 'FALSE') == 'TRUE' or pairs.get('USEPASTESMD', 'FALSE') == 'TRUE'
+                        rule["use_top_paste_th"] = pairs.get('USETOPPASTE', 'FALSE') == 'TRUE' or pairs.get('USETOPPASTETH', 'FALSE') == 'TRUE'
+                        rule["use_bottom_paste_th"] = pairs.get('USEBOTTOMPASTE', 'FALSE') == 'TRUE' or pairs.get('USEBOTTOMPASTETH', 'FALSE') == 'TRUE'
+                        rule["measurement_method"] = pairs.get('MEASUREMENTMETHOD', 'Absolute') or pairs.get('METHOD', 'Absolute')
+                        rule["type"] = "paste_mask"
+                    else:
+                        rule["type"] = "solder_mask"
+                elif 'PLANECONNECT' in rule_kind_upper or ('PLANE' in rule_kind_upper and 'CONNECT' in rule_kind_upper):
+                    # Plane Connect rules - Altium uses RELIEFEXPANSION, RELIEFAIRGAP, RELIEFCONDUCTORWIDTH, RELIEFENTRIES
+                    rule["connect_style"] = pairs.get('PLANECONNECTSTYLE', '') or pairs.get('CONNECTSTYLE', '')
+                    rule["expansion_mm"] = self._convert_coord(pairs.get('RELIEFEXPANSION', '0') or pairs.get('EXPANSION', '0'))
+                    rule["air_gap_mm"] = self._convert_coord(pairs.get('RELIEFAIRGAP', '0') or pairs.get('AIRGAP', '0'))
+                    rule["conductor_width_mm"] = self._convert_coord(pairs.get('RELIEFCONDUCTORWIDTH', '0') or pairs.get('CONDUCTORWIDTH', '0'))
+                    rule["conductor_count"] = int(pairs.get('RELIEFENTRIES', '0') or pairs.get('ENTRIES', '0') or '0')
+                    rule["type"] = "plane_connect"
+                elif 'PLANE' in rule_kind_upper and 'CLEARANCE' not in rule_kind_upper:
+                    # Other Plane rules (not clearance, not connect)
+                    rule["type"] = "plane"
+                elif 'TESTPOINT' in rule_kind_upper:
+                    # Testpoint rules
+                    rule["type"] = "testpoint"
+                elif 'SMT' in rule_kind_upper:
+                    # SMT rules
+                    rule["type"] = "smt"
+                elif 'UNROUTED' in rule_kind_upper:
+                    # Unrouted Net rules
+                    rule["type"] = "unrouted_net"
                 else:
                     rule["type"] = "other"
                 
@@ -630,8 +838,90 @@ class AltiumFileReader:
                     
         except Exception as e:
             print(f"Error in _parse_rules_records: {e}")
+            import traceback
+            traceback.print_exc()
             
         return rules
+    
+    def _parse_polygon_records(self, data: bytes) -> List[Dict[str, Any]]:
+        """Parse polygon/pour data from binary stream"""
+        polygons = []
+        try:
+            text = data.decode('latin-1', errors='ignore')
+            
+            # Altium polygons are stored with NAME, NET, LAYER, etc.
+            # Split by record markers or look for polygon patterns
+            if '|NAME=' in text or '|NET=' in text:
+                # Text format - split by NAME markers
+                parts = text.split('|NAME=')
+                for part in parts[1:]:  # Skip first empty part
+                    pairs = self._parse_key_value_pairs('|NAME=' + part[:5000])  # Limit to avoid next record
+                    
+                    polygon_name = pairs.get('NAME', '')
+                    if not polygon_name:
+                        continue
+                    
+                    # Extract polygon info
+                    polygon = {
+                        "name": polygon_name,
+                        "net": pairs.get('NET', ''),
+                        "layer": pairs.get('LAYER', ''),
+                        "vertices": [],  # Will be populated if coordinate data available
+                        "modified": pairs.get('MODIFIED', 'FALSE') == 'TRUE' or pairs.get('ISMODIFIED', 'FALSE') == 'TRUE',
+                        "shelved": pairs.get('SHELVED', 'FALSE') == 'TRUE' or pairs.get('ISSHELVED', 'FALSE') == 'TRUE',
+                        "pour_style": pairs.get('POURSTYLE', '') or pairs.get('STYLE', ''),
+                        "is_pour": pairs.get('ISCOPPER', 'FALSE') == 'TRUE' or 'POUR' in polygon_name.upper() or pairs.get('KIND', '').upper() == 'COPPER'
+                    }
+                    
+                    polygons.append(polygon)
+            else:
+                # Binary format - estimate count
+                count = self._count_records(data)
+                for i in range(count):
+                    polygons.append({
+                        "name": f"polygon-{i+1}",
+                        "net": "",
+                        "layer": "",
+                        "vertices": [],
+                        "modified": False,
+                        "shelved": False,
+                        "is_pour": True
+                    })
+                
+        except Exception as e:
+            print(f"Error in _parse_polygon_records: {e}")
+        
+        return polygons
+    
+    def _parse_region_records(self, data: bytes) -> List[Dict[str, Any]]:
+        """Parse region data (alternative polygon format)"""
+        regions = []
+        try:
+            text = data.decode('latin-1', errors='ignore')
+            if '|NAME=' in text or '|NET=' in text:
+                parts = text.split('|NAME=')
+                for part in parts[1:]:
+                    pairs = self._parse_key_value_pairs('|NAME=' + part[:5000])
+                    
+                    region_name = pairs.get('NAME', '')
+                    if not region_name:
+                        continue
+                    
+                    region = {
+                        "name": region_name,
+                        "net": pairs.get('NET', ''),
+                        "layer": pairs.get('LAYER', ''),
+                        "vertices": [],
+                        "modified": False,
+                        "shelved": False,
+                        "is_pour": True  # Regions are typically copper pours
+                    }
+                    
+                    regions.append(region)
+        except Exception as e:
+            print(f"Error in _parse_region_records: {e}")
+        
+        return regions
     
     def _count_records(self, data: bytes) -> int:
         """Count records in Altium binary data."""

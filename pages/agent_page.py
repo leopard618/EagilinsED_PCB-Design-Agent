@@ -4,6 +4,7 @@ Main interaction page for EagilinsED
 """
 import customtkinter as ctk
 import tkinter
+from typing import Optional, Dict, Any
 from mcp_client import AltiumMCPClient
 from llm_client import LLMClient
 from agent_orchestrator import AgentOrchestrator
@@ -49,28 +50,29 @@ class ChatMessage(ctk.CTkFrame):
         container = ctk.CTkFrame(self, fg_color="transparent")
         container.grid(row=0, column=0, sticky="e" if is_user else "w")
         
-        # Message bubble
+        # Message bubble with improved styling
         bubble_color = self.colors["user_bg"] if is_user else self.colors["assistant_bg"]
-        bubble = ctk.CTkFrame(
+        self.bubble = ctk.CTkFrame(
             container,
             fg_color=bubble_color,
-            corner_radius=16,
+            corner_radius=18,
             border_width=0 if is_user else 1,
             border_color=self.colors["border"]
         )
-        bubble.grid(row=0, column=0, padx=(60 if is_user else 0, 0 if is_user else 60))
+        self.bubble.grid(row=0, column=0, padx=(60 if is_user else 0, 0 if is_user else 60), pady=4)
+        self.bubble.grid_columnconfigure(0, weight=1)
         
-        # Message text
+        # Message text with better typography
         self.msg_label = ctk.CTkLabel(
-            bubble,
+            self.bubble,
             text=message,
-            font=ctk.CTkFont(size=13),
+            font=ctk.CTkFont(size=14, family="Segoe UI"),
             text_color=self.colors["text"],
             anchor="w",
             justify="left",
-            wraplength=WINDOW_WIDTH - 160
+            wraplength=WINDOW_WIDTH - 180
         )
-        self.msg_label.grid(row=0, column=0, sticky="w", padx=16, pady=14)
+        self.msg_label.grid(row=0, column=0, sticky="w", padx=18, pady=16)
     
     def append_text(self, text: str):
         """Append text for streaming"""
@@ -223,6 +225,10 @@ class AgentPage(ctk.CTkFrame):
             self.agent = None
             print(f"LLM client error: {e}")
         
+        # Rule management flags
+        self.waiting_for_rule_input = False
+        self.rule_action_type = None  # "add" or "update"
+        
         self.setup_ui()
         self.add_welcome_message()
     
@@ -330,7 +336,14 @@ class AgentPage(ctk.CTkFrame):
         self.chat_frame.grid_columnconfigure(0, weight=1)
         
         # === Input Area ===
-        input_container = ctk.CTkFrame(self, fg_color=self.colors["bg_card"], height=80)
+        input_container = ctk.CTkFrame(
+            self, 
+            fg_color=self.colors["bg_card"], 
+            height=90,
+            corner_radius=0,
+            border_width=1,
+            border_color=self.colors["border"]
+        )
         input_container.grid(row=2, column=0, sticky="ew")
         input_container.grid_columnconfigure(0, weight=1)
         input_container.grid_propagate(False)
@@ -409,6 +422,10 @@ class AgentPage(ctk.CTkFrame):
         # Menu items
         menu_items = [
             ("Run DRC", "run_drc", "Run Design Rule Check in Altium"),
+            ("View Design Rules", "view_design_rules", "View all design rules from Altium"),
+            ("Auto-Generate DRC Rules", "auto_generate_rules", "Automatically generate DRC rules from PCB design"),
+            ("Get DRC Suggestions", "get_drc_suggestions", "Get automatic suggestions based on DRC violations"),
+            ("Update DRC Suggestions", "update_drc_suggestions", "Check for updated DRC suggestions"),
             ("Refresh Data", "refresh", "Reload PCB data (from .PcbDoc file or Altium export)"),
             ("Routing Suggestions", "routing", "Generate AI routing suggestions"),
             ("List Components", "list_components", "Show all components"),
@@ -493,6 +510,14 @@ class AgentPage(ctk.CTkFrame):
             self._check_altium_status()
         elif action == "view_drc_report":
             self._open_drc_report()
+        elif action == "auto_generate_rules":
+            self._auto_generate_drc_rules()
+        elif action == "get_drc_suggestions":
+            self._get_drc_suggestions()
+        elif action == "update_drc_suggestions":
+            self._update_drc_suggestions()
+        elif action == "view_design_rules":
+            self._view_design_rules()
     
     def _run_altium_drc(self):
         """Check for existing DRC report or provide simple instructions"""
@@ -660,8 +685,13 @@ class AgentPage(ctk.CTkFrame):
                                         # Get AI analysis of DRC report
                                         try:
                                             # Update parser to use the found file
-                                            from tools.drc_report_parser import parse_drc_report
-                                            report_data = parse_drc_report(str(latest_file))
+                                            # Use Python DRC instead of HTML parsing
+                                            import requests
+                                            drc_result = requests.get("http://localhost:8765/drc/run", timeout=30)
+                                            if drc_result.status_code == 200:
+                                                report_data = drc_result.json()
+                                            else:
+                                                report_data = {"error": "Failed to run DRC"}
                                             
                                             if "error" not in report_data:
                                                 drc_summary = self.agent._check_altium_drc_result()
@@ -769,8 +799,10 @@ class AgentPage(ctk.CTkFrame):
                     # Wait a moment for file to be written
                     time.sleep(0.5)
                     
-                    # Load the exported file
-                    pcb_info_file = Path("altium_pcb_info.json")
+                    # Load the exported file (check PCB_Project folder first)
+                    pcb_info_file = Path("PCB_Project") / "altium_pcb_info.json"
+                    if not pcb_info_file.exists():
+                        pcb_info_file = Path("altium_pcb_info.json")
                     if pcb_info_file.exists():
                         self._safe_after(0, lambda: self.add_message(
                             "PCB data exported successfully!\n"
@@ -870,8 +902,10 @@ class AgentPage(ctk.CTkFrame):
                         self._safe_after(0, lambda: self.set_status("Loaded", "success"))
                         return
                 
-                # FALLBACK: Check for auto-exported file from StartServer
-                pcb_info_file = Path("altium_pcb_info.json")
+                # FALLBACK: Check for auto-exported file from StartServer (check PCB_Project folder first)
+                pcb_info_file = Path("PCB_Project") / "altium_pcb_info.json"
+                if not pcb_info_file.exists():
+                    pcb_info_file = Path("altium_pcb_info.json")
                 
                 # Also check for timestamped export files
                 if not pcb_info_file.exists():
@@ -1069,15 +1103,25 @@ Chat with me to:
         if not text or self.is_loading:
             return
         
-        if not self.agent:
-            self.add_message("LLM not available. Check OpenAI API key.", is_user=False)
-            return
-        
         # Clear input
         self.input_entry.delete(0, "end")
         
         # Add user message
         self.add_message(text, is_user=True)
+        
+        # Check if we're waiting for rule input
+        if self.waiting_for_rule_input:
+            self.waiting_for_rule_input = False
+            action_type = self.rule_action_type
+            self.rule_action_type = None
+            
+            # Process rule creation/update
+            self._process_rule_request(text, action_type)
+            return
+        
+        if not self.agent:
+            self.add_message("LLM not available. Check OpenAI API key.", is_user=False)
+            return
         
         # Update status
         self.set_status("Processing...", "warning")
@@ -1174,37 +1218,21 @@ Chat with me to:
         self.chat_frame._parent_canvas.yview_moveto(1.0)
     
     def _add_drc_helper_button(self):
-        """Add button to open DRC report in browser"""
-        import os
-        import webbrowser
-        from pathlib import Path
-        import glob
-        
-        # Find Altium DRC report in Project Outputs folder
-        project_outputs = Path("PCB_Project/Project Outputs for PCB_Project")
-        report_path = None
-        
-        if project_outputs.exists():
-            # Find the latest DRC HTML report
-            html_files = list(project_outputs.glob("Design Rule Check*.html"))
-            if html_files:
-                # Get the most recent one
-                report_path = max(html_files, key=lambda p: p.stat().st_mtime)
-        
+        """Add button to run Python DRC check"""
         # Create button container
         btn_container = ctk.CTkFrame(self.chat_frame, fg_color="transparent")
         btn_container.grid(row=len(self.messages) + 100, column=0, sticky="w", pady=10, padx=10)
         
-        # Open DRC Report button
+        # Run DRC Check button (replaces old HTML report viewer)
         report_btn = ctk.CTkButton(
             btn_container,
-            text="📄 View DRC Report in Browser",
+            text="🔍 Run DRC Check",
             width=220,
             height=40,
             fg_color=self.colors["primary"],
             hover_color=self.colors["primary_hover"],
             font=ctk.CTkFont(size=13, weight="bold"),
-            command=lambda: self._open_drc_report(str(report_path) if report_path else None)
+            command=self._open_drc_report
         )
         report_btn.pack(side="left", padx=5)
         
@@ -1213,31 +1241,1293 @@ Chat with me to:
         self.chat_frame._parent_canvas.yview_moveto(1.0)
     
     def _open_drc_report(self, path: str = None):
-        """Open DRC report in default browser"""
-        import webbrowser
-        import os
-        from pathlib import Path
+        """Run Python DRC check (replaces old HTML report viewer)"""
+        # This method now triggers a Python DRC check instead of opening HTML
+        self._get_drc_suggestions()
+    
+    def _auto_generate_drc_rules(self):
+        """Automatically generate DRC rules from PCB design"""
+        self.add_message("Generating DRC rules automatically from PCB design...", is_user=False)
+        self.set_status("Generating Rules...", "warning")
         
-        # Always search for the latest report
-        project_outputs = Path("PCB_Project/Project Outputs for PCB_Project").absolute()
-        report_path = None
-        
-        if project_outputs.exists():
-            html_files = list(project_outputs.glob("Design Rule Check*.html"))
-            if html_files:
-                report_path = max(html_files, key=lambda p: p.stat().st_mtime)
-        
-        if report_path and report_path.exists():
-            # Use os.startfile on Windows for reliable file opening
+        def generate_rules():
             try:
-                os.startfile(str(report_path))
+                result = self.mcp_client.session.get("http://localhost:8765/drc/auto-generate-rules?update_existing=true")
+                
+                if result.status_code == 200:
+                    data = result.json()
+                    if data.get("success"):
+                        rule_count = data.get("rule_count", 0)
+                        msg = f"✅ **DRC Rules Generated Successfully!**\n\n"
+                        msg += f"**Generated {rule_count} design rules** based on your PCB design:\n\n"
+                        msg += "• Rules are automatically created based on:\n"
+                        msg += "  - Net types (Power, Ground, High-Speed, etc.)\n"
+                        msg += "  - Board size and complexity\n"
+                        msg += "  - Component density\n"
+                        msg += "  - Layer count\n\n"
+                        msg += "**Next steps:**\n"
+                        msg += "1. Run DRC to check for violations\n"
+                        msg += "2. Get suggestions to see recommendations\n"
+                        msg += "3. Rules will be used automatically in future DRC checks\n"
+                        
+                        self._safe_after(0, lambda: self.add_message(msg, is_user=False))
+                        self._safe_after(0, lambda: self.set_status("Rules Generated", "success"))
+                    else:
+                        error_msg = data.get("error", "Unknown error")
+                        self._safe_after(0, lambda: self.add_message(
+                            f"❌ Error generating rules: {error_msg}\n\n"
+                            "Make sure a PCB is loaded first (use Refresh Data).",
+                            is_user=False
+                        ))
+                        self._safe_after(0, lambda: self.set_status("Error", "error"))
+                else:
+                    self._safe_after(0, lambda: self.add_message(
+                        "❌ Failed to connect to MCP server. Make sure mcp_server.py is running.",
+                        is_user=False
+                    ))
+                    self._safe_after(0, lambda: self.set_status("Connection Error", "error"))
+            except Exception as e:
+                self._safe_after(0, lambda: self.add_message(
+                    f"❌ Error: {str(e)}",
+                    is_user=False
+                ))
+                self._safe_after(0, lambda: self.set_status("Error", "error"))
+        
+        threading.Thread(target=generate_rules, daemon=True).start()
+    
+    def _get_drc_suggestions(self):
+        """Run Python DRC check and display results"""
+        self.add_message("Running DRC check...", is_user=False)
+        self.set_status("Checking...", "warning")
+        
+        def run_drc():
+            try:
+                # First, run DRC check
+                result = self.mcp_client.session.get("http://localhost:8765/drc/run")
+                
+                if result.status_code == 200:
+                    data = result.json()
+                    if data.get("success"):
+                        # Display DRC results in Altium-style format
+                        summary = data.get("summary", {})
+                        violations = data.get("violations", [])
+                        warnings = data.get("warnings", [])
+                        violations_by_rule = data.get("violations_by_rule", {})
+                        
+                        # Get additional data
+                        all_rules = data.get("all_rules_checked", [])
+                        filename = data.get("filename", "Unknown")
+                        python_checked_rules = data.get("python_checked_rules", [])
+                        total_rules = data.get("total_rules", 0)
+                        rules_checked_count = data.get("rules_checked_count", 0)
+                        # Main title with larger header
+                        msg = "# 📊 Design Rule Check Report\n\n"
+                        
+                        # Filename with emphasis
+                        msg += f"**PCB File:** `{filename}`\n\n"
+                        msg += "---\n\n"
+                        
+                        # Summary section with visual emphasis
+                        msg += "## 📈 Summary\n\n"
+                        
+                        warnings_count = summary.get('warnings', 0)
+                        violations_count = summary.get('rule_violations', 0)
+                        
+                        # Use larger, bolder text for key metrics
+                        if violations_count == 0 and warnings_count == 0:
+                            msg += "### ✅ **All Checks Passed!**\n\n"
+                            msg += "**Warnings:** `0`  |  **Rule Violations:** `0`\n\n"
+                        else:
+                            if violations_count > 0:
+                                msg += f"### 🔴 **Rule Violations:** `{violations_count}`\n\n"
+                            if warnings_count > 0:
+                                msg += f"### ⚠️ **Warnings:** `{warnings_count}`\n\n"
+                        
+                        msg += "---\n\n"
+                        
+                        # Warnings section
+                        msg += "## ⚠️ Warnings\n\n"
+                        if warnings:
+                            msg += f"**Total:** **{len(warnings)}** warning(s)\n\n"
+                        else:
+                            msg += "**Total:** **0** warnings\n\n"
+                        
+                        msg += "---\n\n"
+                        
+                        # Rule Violations section with better table formatting
+                        msg += "## 📋 Rule Violations\n\n"
+                        msg += "| **Rule Violations** | **Count** |\n"
+                        msg += "|:-------------------|----------:|\n"
+                        
+                        if all_rules:
+                            # Show all rules checked, even with 0 violations
+                            for rule_info in all_rules:
+                                formatted_name = rule_info.get("formatted_name", rule_info.get("rule_name", "Unknown"))
+                                count = rule_info.get("count", 0)
+                                msg += f"| {formatted_name} | {count} |\n"
+                        elif violations_by_rule:
+                            # Fallback: show only rules with violations
+                            for rule_name, count in sorted(violations_by_rule.items()):
+                                msg += f"| {rule_name} | {count} |\n"
+                        else:
+                            # No rules found - show placeholder
+                            msg += "| No rules checked | 0 |\n"
+                        
+                        msg += f"\n**Total Violations:** **{summary.get('rule_violations', 0)}**\n\n"
+                        
+                        msg += "---\n\n"
+                        
+                        # Python DRC Engine Information with better formatting
+                        msg += "## 🔧 Python DRC Engine Information\n\n"
+                        
+                        # Summary stats in a clean box format
+                        msg += "| **Metric** | **Value** |\n"
+                        msg += "|:-----------|----------:|\n"
+                        msg += f"| Total Design Rules Found | **{total_rules}** |\n"
+                        msg += f"| Rules Checked by Python DRC | **{rules_checked_count}** |\n\n"
+                        
+                        if python_checked_rules:
+                            msg += "### 📋 Rules Currently Checked\n\n"
+                            
+                            # Group by rule type
+                            by_type = {}
+                            for rule in python_checked_rules:
+                                rule_type = rule.get("rule_type", "other")
+                                if rule_type not in by_type:
+                                    by_type[rule_type] = []
+                                by_type[rule_type].append(rule.get("formatted_name", rule.get("rule_name")))
+                            
+                            # Show by category with better formatting
+                            type_labels = {
+                                'clearance': '🔲 Clearance Constraints',
+                                'width': '📏 Width Constraints',
+                                'via': '🔘 Via/Hole Size Constraints',
+                                'hole_size': '🕳️ Hole Size Constraints',
+                                'short_circuit': '⚡ Short-Circuit Constraints',
+                                'unrouted_net': '🔌 Un-Routed Net Constraints',
+                                'hole_to_hole_clearance': '📐 Hole To Hole Clearance',
+                                'solder_mask_sliver': '🛡️ Minimum Solder Mask Sliver',
+                                'silk_to_solder_mask': '🎨 Silk To Solder Mask',
+                                'silk_to_silk': '🖨️ Silk to Silk',
+                                'height': '📏 Height Constraints',
+                                'modified_polygon': '🔷 Modified Polygon',
+                                'net_antennae': '📡 Net Antennae',
+                                'diff_pairs_routing': '⚖️ Differential Pair Routing',
+                                'routing_topology': '🌐 Routing Topology',
+                                'routing_via_style': '🔧 Via Style Constraints',
+                                'routing_corners': '📐 Routing Corners',
+                                'routing_layers': '📚 Routing Layers',
+                                'routing_priority': '⭐ Routing Priority',
+                                'plane_connect': '🔌 Power Plane Connect'
+                            }
+                            
+                            # Create a cleaner table format for rules
+                            msg += "| **Category** | **Count** | **Rules** |\n"
+                            msg += "|:-------------|----------:|:----------|\n"
+                            
+                            for rule_type, rules_list in sorted(by_type.items()):
+                                label = type_labels.get(rule_type, f"📌 {rule_type.replace('_', ' ').title()}")
+                                count = len(rules_list)
+                                
+                                # Format rule names (show first 2, then count)
+                                if count <= 2:
+                                    rules_display = " • ".join([f"`{r}`" for r in rules_list])
+                                else:
+                                    rules_display = f"`{rules_list[0]}` • `{rules_list[1]}` • *+{count-2} more*"
+                                
+                                msg += f"| {label} | **{count}** | {rules_display} |\n"
+                            
+                            msg += "\n"
+                        else:
+                            msg += "> ⚠️ **Note:** No rules were found in the PCB file. Using default rules for checking.\n\n"
+                        
+                        msg += "---\n\n"
+                        msg += "### ✅ **Engine Capabilities**\n\n"
+                        msg += "The Python DRC engine performs comprehensive validation including:\n\n"
+                        
+                        # Use a cleaner two-column format for capabilities
+                        capabilities = [
+                            ("🔍 Clearance violations", "Pad-to-pad, via-to-pad spacing"),
+                            ("📏 Track width constraints", "Min/max width validation"),
+                            ("🔘 Via & hole size", "Diameter and drill size checks"),
+                            ("⚡ Short-circuit detection", "Overlap detection between nets"),
+                            ("🔌 Unrouted net detection", "With polygon connectivity support"),
+                            ("📐 Hole-to-hole clearance", "Edge-to-edge distance validation"),
+                            ("🛡️ Solder mask sliver", "Mask gap detection"),
+                            ("🎨 Silk screen clearance", "Silk-to-silk and silk-to-mask"),
+                            ("📏 Component height", "Height constraint validation"),
+                            ("🔷 Modified polygon", "Polygon modification checks"),
+                            ("📡 Net antennae", "Stub trace detection"),
+                            ("⚖️ Differential pairs", "Width and gap validation"),
+                            ("🌐 Routing topology", "Topology pattern validation"),
+                            ("🔧 Via style", "Via dimension constraints"),
+                            ("📐 Routing corners", "Corner angle validation"),
+                            ("📚 Routing layers", "Layer restriction checks"),
+                            ("⭐ Routing priority", "Priority-based validation"),
+                            ("🔌 Power plane connect", "Plane connection style")
+                        ]
+                        
+                        # Display in a clean two-column table
+                        msg += "| **Feature** | **Description** |\n"
+                        msg += "|:------------|:-----------------|\n"
+                        for feature, desc in capabilities:
+                            msg += f"| {feature} | {desc} |\n"
+                        
+                        msg += "\n"
+                        
+                        if total_rules > rules_checked_count:
+                            msg += "---\n\n"
+                            msg += f"> ⚠️ **Note:** **{total_rules - rules_checked_count}** rule(s) found in PCB are not yet fully implemented.\n"
+                            msg += "> These rules appear in the table above but may have limited validation.\n\n"
+                        
+                        if summary.get("passed", False):
+                            msg += "✅ **All checks passed!** No violations or warnings detected.\n\n"
+                            self._safe_after(0, lambda m=msg: self.add_message(m, is_user=False))
+                            self._safe_after(0, lambda: self.set_status("Passed", "success"))
+                            return
+                        
+                        # Show detailed violations (first 10)
+                        if violations:
+                            msg += "---\n\n"
+                            msg += "## 🔍 Detailed Violations\n\n"
+                            for i, v in enumerate(violations[:10], 1):
+                                rule_type = v.get("type", "unknown").replace("_", " ").title()
+                                message = v.get("message", "")
+                                location = v.get("location", {})
+                                
+                                msg += f"### **{i}. {rule_type}**\n"
+                                if location.get("x_mm") is not None and location.get("y_mm") is not None:
+                                    msg += f"- **Location:** `({location['x_mm']:.2f}, {location['y_mm']:.2f}) mm`\n"
+                                if location.get("layer"):
+                                    msg += f"- **Layer:** `{location['layer']}`\n"
+                                if v.get("component_name"):
+                                    msg += f"- **Component:** `{v['component_name']}`\n"
+                                if v.get("net_name"):
+                                    msg += f"- **Net:** `{v['net_name']}`\n"
+                                if v.get("actual_value") is not None and v.get("required_value") is not None:
+                                    msg += f"- **Actual:** `{v['actual_value']} mm` | **Required:** `{v['required_value']} mm`\n"
+                                msg += f"\n*{message}*\n\n"
+                            
+                            if len(violations) > 10:
+                                msg += f"---\n\n"
+                                msg += f"*... and **{len(violations) - 10}** more violation(s).*\n\n"
+                        
+                        # Get suggestions if violations exist
+                        if violations:
+                            try:
+                                suggestions_result = self.mcp_client.session.get("http://localhost:8765/drc/suggestions")
+                                if suggestions_result.status_code == 200:
+                                    suggestions_data = suggestions_result.json()
+                                    if suggestions_data.get("success"):
+                                        suggestions = suggestions_data.get("suggestions", [])
+                                        if suggestions:
+                                            msg += "### 💡 Suggestions\n\n"
+                                            for s in suggestions[:5]:
+                                                msg += f"• {s.get('message', 'No message')}\n"
+                                            if len(suggestions) > 5:
+                                                msg += f"\n... and {len(suggestions) - 5} more suggestions.\n"
+                            except:
+                                pass  # Suggestions are optional
+                        
+                        self._safe_after(0, lambda m=msg: self.add_message(m, is_user=False))
+                        self._safe_after(0, lambda: self.set_status("DRC Complete", "success" if summary.get("passed") else "warning"))
+                    else:
+                        error_msg = data.get("error", "Unknown error")
+                        self._safe_after(0, lambda: self.add_message(
+                            f"❌ DRC check failed: {error_msg}",
+                            is_user=False
+                        ))
+                        self._safe_after(0, lambda: self.set_status("Error", "error"))
+                else:
+                    self._safe_after(0, lambda: self.add_message(
+                        "❌ Failed to connect to MCP server.",
+                        is_user=False
+                    ))
+                    self._safe_after(0, lambda: self.set_status("Connection Error", "error"))
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self._safe_after(0, lambda: self.add_message(
+                    f"❌ Error: {str(e)}",
+                    is_user=False
+                ))
+                self._safe_after(0, lambda: self.set_status("Error", "error"))
+        
+        threading.Thread(target=run_drc, daemon=True).start()
+    
+    def _update_drc_suggestions(self):
+        """Check for updates to DRC suggestions"""
+        self.add_message("Checking for suggestion updates...", is_user=False)
+        self.set_status("Checking...", "warning")
+        
+        def check_updates():
+            try:
+                result = self.mcp_client.session.get("http://localhost:8765/drc/update-suggestions")
+                
+                if result.status_code == 200:
+                    data = result.json()
+                    if data.get("updated"):
+                        msg = f"📊 **Suggestion Update**\n\n"
+                        msg += f"{data.get('message', 'Suggestions updated')}\n\n"
+                        msg += f"• Previous violations: {data.get('old_count', 0)}\n"
+                        msg += f"• Current violations: {data.get('new_count', 0)}\n"
+                        msg += f"• Fixed: {data.get('fixed_count', 0)}\n"
+                        msg += f"• New issues: {data.get('new_issues_count', 0)}\n\n"
+                        
+                        if data.get("improvement"):
+                            msg += "✅ Design is improving!\n"
+                        else:
+                            msg += "⚠️ Some new issues found.\n"
+                        
+                        msg += "\nUse 'Get DRC Suggestions' to see detailed recommendations."
+                        
+                        self._safe_after(0, lambda m=msg: self.add_message(m, is_user=False))
+                        self._safe_after(0, lambda: self.set_status("Updated", "success"))
+                    else:
+                        self._safe_after(0, lambda: self.add_message(
+                            data.get("message", "No updates available."),
+                            is_user=False
+                        ))
+                        self._safe_after(0, lambda: self.set_status("No Updates", "info"))
+                else:
+                    self._safe_after(0, lambda: self.add_message(
+                        "❌ Failed to connect to MCP server.",
+                        is_user=False
+                    ))
+                    self._safe_after(0, lambda: self.set_status("Connection Error", "error"))
+            except Exception as e:
+                self._safe_after(0, lambda: self.add_message(
+                    f"❌ Error: {str(e)}",
+                    is_user=False
+                ))
+                self._safe_after(0, lambda: self.set_status("Error", "error"))
+        
+        threading.Thread(target=check_updates, daemon=True).start()
+    
+    def _view_design_rules(self):
+        """View all design rules from Altium"""
+        self.add_message("Loading design rules from Altium...", is_user=False)
+        self.set_status("Loading Rules...", "warning")
+        
+        def load_rules():
+            try:
+                result = self.mcp_client.session.get("http://localhost:8765/drc/rules")
+                
+                if result.status_code == 200:
+                    data = result.json()
+                    if data.get("success"):
+                        rules = data.get("rules", [])
+                        stats = data.get("statistics", {})
+                        rules_by_category = data.get("rules_by_category", {})
+                        
+                        if rules:
+                            msg = f"📋 **Design Rules from Altium**\n\n"
+                            msg += f"**Total Rules:** {stats.get('total', 0)} "
+                            msg += f"(Enabled: {stats.get('enabled', 0)})\n\n"
+                            
+                            # Display rules grouped by category
+                            for category in ["Electrical", "Routing", "Placement", "Mask", "Plane", "Other"]:
+                                if category in rules_by_category:
+                                    msg += f"**{category} Rules:**\n"
+                                    for rule in rules_by_category[category]:
+                                        name = rule.get('name', 'Unnamed')
+                                        rule_type = rule.get('type', 'unknown')
+                                        enabled = "✅" if rule.get('enabled', True) else "❌"
+                                        
+                                        msg += f"{enabled} **{name}** ({rule_type})\n"
+                                        
+                                        # Show rule-specific parameters
+                                        if rule_type == "clearance":
+                                            clearance = rule.get('clearance_mm', 0)
+                                            msg += f"   • Minimum Clearance: {clearance:.3f}mm\n"
+                                            if rule.get('scope_first'):
+                                                msg += f"   • Scope: {rule.get('scope_first')}\n"
+                                        elif rule_type == "width":
+                                            min_w = rule.get('min_width_mm', 0)
+                                            pref_w = rule.get('preferred_width_mm', 0)
+                                            max_w = rule.get('max_width_mm', 0)
+                                            msg += f"   • Min: {min_w:.3f}mm, Preferred: {pref_w:.3f}mm"
+                                            if max_w > 0:
+                                                msg += f", Max: {max_w:.3f}mm"
+                                            msg += "\n"
+                                            if rule.get('scope_first'):
+                                                msg += f"   • Scope: {rule.get('scope_first')}\n"
+                                        elif rule_type == "via":
+                                            # Display all 6 parameters: Min/Max/Preferred for Hole and Diameter
+                                            min_hole = rule.get('min_hole_mm', 0)
+                                            max_hole = rule.get('max_hole_mm', 0)
+                                            pref_hole = rule.get('preferred_hole_mm', 0)
+                                            min_dia = rule.get('min_diameter_mm', 0)
+                                            max_dia = rule.get('max_diameter_mm', 0)
+                                            pref_dia = rule.get('preferred_diameter_mm', 0)
+                                            via_style = rule.get('via_style', '')
+                                            if via_style:
+                                                msg += f"   • Via Style: {via_style}\n"
+                                            msg += f"   • Via Hole Size: Min: {min_hole:.3f}mm"
+                                            if pref_hole > 0:
+                                                msg += f", Preferred: {pref_hole:.3f}mm"
+                                            if max_hole > 0:
+                                                msg += f", Max: {max_hole:.3f}mm"
+                                            msg += "\n"
+                                            msg += f"   • Via Diameter: Min: {min_dia:.3f}mm"
+                                            if pref_dia > 0:
+                                                msg += f", Preferred: {pref_dia:.3f}mm"
+                                            if max_dia > 0:
+                                                msg += f", Max: {max_dia:.3f}mm"
+                                            msg += "\n"
+                                        elif rule_type == "routing_corners":
+                                            style = rule.get('corner_style', '')
+                                            setback = rule.get('setback_mm', 0)
+                                            setback_to = rule.get('setback_to_mm', 0)
+                                            if style:
+                                                msg += f"   • Style: {style}\n"
+                                            if setback > 0:
+                                                # Always show "to" parameter even if same value
+                                                if setback_to > 0:
+                                                    msg += f"   • Setback: {setback:.3f}mm to {setback_to:.3f}mm\n"
+                                                else:
+                                                    msg += f"   • Setback: {setback:.3f}mm\n"
+                                        elif rule_type == "routing_topology":
+                                            topology = rule.get('topology', '')
+                                            if topology:
+                                                msg += f"   • Topology: {topology}\n"
+                                        elif rule_type == "diff_pairs_routing":
+                                            min_w = rule.get('min_width_mm', 0)
+                                            max_w = rule.get('max_width_mm', 0)
+                                            pref_w = rule.get('preferred_width_mm', 0)
+                                            min_gap = rule.get('min_gap_mm', 0)
+                                            max_gap = rule.get('max_gap_mm', 0)
+                                            pref_gap = rule.get('preferred_gap_mm', 0)
+                                            max_unc = rule.get('max_uncoupled_length_mm', 0)
+                                            msg += f"   • Min Width: {min_w:.3f}mm, Preferred: {pref_w:.3f}mm, Max: {max_w:.3f}mm\n"
+                                            msg += f"   • Min Gap: {min_gap:.3f}mm, Preferred: {pref_gap:.3f}mm, Max: {max_gap:.3f}mm\n"
+                                            if max_unc > 0:
+                                                msg += f"   • Max Uncoupled Length: {max_unc:.3f}mm\n"
+                                        elif rule_type == "plane_clearance":
+                                            clearance = rule.get('clearance_mm', 0)
+                                            msg += f"   • Clearance: {clearance:.3f}mm\n"
+                                        elif rule_type == "plane_connect":
+                                            style = rule.get('connect_style', '')
+                                            expansion = rule.get('expansion_mm', 0)
+                                            air_gap = rule.get('air_gap_mm', 0)
+                                            conductor_width = rule.get('conductor_width_mm', 0)
+                                            conductor_count = rule.get('conductor_count', 0)
+                                            if style:
+                                                msg += f"   • Connect Style: {style}\n"
+                                            if expansion > 0:
+                                                msg += f"   • Expansion: {expansion:.3f}mm\n"
+                                            if air_gap > 0:
+                                                msg += f"   • Air-Gap: {air_gap:.3f}mm\n"
+                                            if conductor_width > 0:
+                                                msg += f"   • Conductor Width: {conductor_width:.3f}mm\n"
+                                            if conductor_count > 0:
+                                                msg += f"   • Conductors: {conductor_count}\n"
+                                        elif rule_type == "paste_mask":
+                                            # Paste mask specific settings
+                                            use_paste_smd = rule.get('use_paste_smd', None)
+                                            use_top_paste_th = rule.get('use_top_paste_th', None)
+                                            use_bottom_paste_th = rule.get('use_bottom_paste_th', None)
+                                            measurement_method = rule.get('measurement_method', '')
+                                            expansion = rule.get('expansion_mm', 0)
+                                            expansion_bottom = rule.get('expansion_bottom_mm', 0)
+                                            
+                                            if use_paste_smd is not None:
+                                                msg += f"   • SMD Pads - Use Paste: {'Yes' if use_paste_smd else 'No'}\n"
+                                            if use_top_paste_th is not None:
+                                                msg += f"   • TH Pads - Use Top Paste: {'Yes' if use_top_paste_th else 'No'}\n"
+                                            if use_bottom_paste_th is not None:
+                                                msg += f"   • TH Pads - Use Bottom Paste: {'Yes' if use_bottom_paste_th else 'No'}\n"
+                                            if measurement_method:
+                                                msg += f"   • Measurement Method: {measurement_method}\n"
+                                            if expansion >= 0:  # Show even if 0
+                                                if expansion_bottom > 0 and expansion_bottom != expansion:
+                                                    msg += f"   • Expansion Top: {expansion:.3f}mm\n"
+                                                    msg += f"   • Expansion Bottom: {expansion_bottom:.3f}mm\n"
+                                                else:
+                                                    msg += f"   • Expansion: {expansion:.3f}mm\n"
+                                        elif rule_type == "solder_mask":
+                                            expansion = rule.get('expansion_mm', 0)
+                                            expansion_bottom = rule.get('expansion_bottom_mm', 0)
+                                            if expansion > 0:
+                                                if expansion_bottom > 0 and expansion_bottom != expansion:
+                                                    msg += f"   • Expansion Top: {expansion:.3f}mm\n"
+                                                    msg += f"   • Expansion Bottom: {expansion_bottom:.3f}mm\n"
+                                                else:
+                                                    msg += f"   • Expansion: {expansion:.3f}mm (top & bottom)\n"
+                                            tented_top = rule.get('tented_top', False)
+                                            tented_bottom = rule.get('tented_bottom', False)
+                                            if tented_top or tented_bottom:
+                                                tented_parts = []
+                                                if tented_top:
+                                                    tented_parts.append("top")
+                                                if tented_bottom:
+                                                    tented_parts.append("bottom")
+                                                msg += f"   • Tented: {', '.join(tented_parts)}\n"
+                                        
+                                        priority = rule.get('priority', 0)
+                                        if priority > 0:
+                                            msg += f"   • Priority: {priority}\n"
+                                        
+                                        msg += "\n"
+                                    msg += "\n"
+                            
+                            msg += "\n**Note:** These are the actual rules from your Altium PCB file.\n"
+                            
+                            self._safe_after(0, lambda m=msg: self.add_message(m, is_user=False))
+                            # Add buttons for rule management
+                            self._safe_after(0, lambda: self.add_rule_management_buttons())
+                            self._safe_after(0, lambda: self.set_status("Rules Loaded", "success"))
+                    elif not data.get("success"):
+                        # Check if it's an error about missing export file
+                        error_msg = data.get("error", "").lower()
+                        message = data.get("message", "")
+                        
+                        if "export" in error_msg or "export" in message.lower():
+                            self._safe_after(0, lambda: self.add_message(
+                                "⚠️ **No Altium Export File Found**\n\n"
+                                "**To get all design rules from Altium:**\n\n"
+                                "1. **In Altium Designer:**\n"
+                                "   - Open your PCB file\n"
+                                "   - Run Script: `command_server.pas`\n"
+                                "   - Execute: `ExportPCBInfo` procedure\n"
+                                "   - This exports ALL rules to `altium_pcb_info.json`\n\n"
+                                "2. **Then refresh:**\n"
+                                "   - Click 'Refresh Data' in the menu\n"
+                                "   - Or click 'View Design Rules' again\n\n"
+                                "**Note:** The export includes ALL rules:\n"
+                                "• Clearance rules (Clearance_1, LBBZHUANYONG, etc.)\n"
+                                "• Routing rules (width, via)\n"
+                                "• SMT rules\n"
+                                "• Mask rules (PasteMaskExpansion, etc.)\n"
+                                "• Plane rules\n"
+                                "• And all other rule types",
+                                is_user=False
+                            ))
+                        else:
+                            self._safe_after(0, lambda: self.add_message(
+                                "⚠️ No design rules found in PCB.\n\n"
+                                "**To get rules:**\n"
+                                "1. Export PCB info from Altium (run ExportPCBInfo in command_server.pas)\n"
+                                "2. Then click 'Refresh Data' to reload",
+                                is_user=False
+                            ))
+                        self._safe_after(0, lambda: self.set_status("No Rules", "warning"))
+                    else:
+                        error_msg = data.get("error", "Unknown error")
+                        self._safe_after(0, lambda: self.add_message(
+                            f"❌ Error loading rules: {error_msg}\n\n"
+                            "Make sure a PCB is loaded first (use Refresh Data).",
+                            is_user=False
+                        ))
+                        self._safe_after(0, lambda: self.set_status("Error", "error"))
+                else:
+                    self._safe_after(0, lambda: self.add_message(
+                        "❌ Failed to connect to MCP server.",
+                        is_user=False
+                    ))
+                    self._safe_after(0, lambda: self.set_status("Connection Error", "error"))
+            except Exception as e:
+                self._safe_after(0, lambda: self.add_message(
+                    f"❌ Error: {str(e)}",
+                    is_user=False
+                ))
+                self._safe_after(0, lambda: self.set_status("Error", "error"))
+        
+        threading.Thread(target=load_rules, daemon=True).start()
+    
+    def add_rule_management_buttons(self):
+        """Add buttons for rule management after displaying rules"""
+        # Create a modern card-style container for buttons
+        card_frame = ctk.CTkFrame(
+            self.chat_frame,
+            fg_color=self.colors["bg_card"],
+            corner_radius=12,
+            border_width=1,
+            border_color=self.colors["border"]
+        )
+        card_frame.grid(row=len(self.messages), column=0, sticky="ew", padx=20, pady=12)
+        card_frame.grid_columnconfigure(0, weight=1)
+        self.messages.append(card_frame)
+        
+        # Title section
+        title_frame = ctk.CTkFrame(card_frame, fg_color="transparent")
+        title_frame.grid(row=0, column=0, sticky="ew", padx=20, pady=(16, 8))
+        
+        title_label = ctk.CTkLabel(
+            title_frame,
+            text="Rule Management",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=self.colors["text"]
+        )
+        title_label.pack(side="left")
+        
+        # Button container with better spacing
+        button_frame = ctk.CTkFrame(card_frame, fg_color="transparent")
+        button_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 16))
+        button_frame.grid_columnconfigure(0, weight=1)
+        button_frame.grid_columnconfigure(1, weight=1)
+        button_frame.grid_columnconfigure(2, weight=1)
+        
+        # Add New Rule button - improved styling with icon and short text
+        add_btn = ctk.CTkButton(
+            button_frame,
+            text="➕ Add",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            height=42,
+            corner_radius=10,
+            fg_color=self.colors["primary"],
+            hover_color=self.colors["primary_hover"],
+            text_color="#ffffff",
+            command=self._handle_add_new_rule,
+            border_width=0
+        )
+        add_btn.grid(row=0, column=0, padx=(0, 6), sticky="ew")
+        
+        # Update Existing Rule button - improved styling with icon and short text
+        update_btn = ctk.CTkButton(
+            button_frame,
+            text="✏️ Update",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            height=42,
+            corner_radius=10,
+            fg_color=self.colors["accent"],
+            hover_color="#0891b2",
+            text_color="#ffffff",
+            command=self._handle_update_existing_rule,
+            border_width=0
+        )
+        update_btn.grid(row=0, column=1, padx=3, sticky="ew")
+        
+        # Delete Rule button - improved styling with icon and short text
+        delete_btn = ctk.CTkButton(
+            button_frame,
+            text="🗑️ Delete",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            height=42,
+            corner_radius=10,
+            fg_color="#dc2626",
+            hover_color="#b91c1c",
+            text_color="#ffffff",
+            command=self._handle_delete_rule,
+            border_width=0
+        )
+        delete_btn.grid(row=0, column=2, padx=(6, 0), sticky="ew")
+        
+        # Scroll to bottom
+        self.chat_frame.update()
+        self.chat_frame._parent_canvas.yview_moveto(1.0)
+    
+    def _handle_add_new_rule(self):
+        """Handle Add New Rule button click"""
+        self.add_message(
+            "Please input what rule do you want to add in detail.\n\n"
+            "**Examples:**\n"
+            "• Add a clearance rule: 'Add clearance rule between +5V and +21V nets with 0.508mm clearance'\n"
+            "• Add a width rule: 'Add width rule for power nets with min 0.5mm, preferred 0.8mm, max 1.0mm'\n"
+            "• Add a via rule: 'Add via rule with min hole 0.3mm, max hole 0.5mm, min diameter 0.6mm'\n\n"
+            "Type your rule requirements in the chat box below:",
+            is_user=False
+        )
+        # Focus on input
+        self.input_entry.focus()
+        # Set flag to indicate we're waiting for rule input
+        self.waiting_for_rule_input = True
+        self.rule_action_type = "add"
+    
+    def _handle_update_existing_rule(self):
+        """Handle Update Existing Rule button click"""
+        self.add_message(
+            "Please specify which rule you want to update and the new values.\n\n"
+            "**Examples:**\n"
+            "• 'Update PlaneClearance rule to 0.6mm'\n"
+            "• 'Change Width rule preferred width to 1.0mm'\n"
+            "• 'Update RoutingVias max hole size to 0.8mm'\n\n"
+            "Type your rule update requirements in the chat box below:",
+            is_user=False
+        )
+        # Focus on input
+        self.input_entry.focus()
+        # Set flag to indicate we're waiting for rule input
+        self.waiting_for_rule_input = True
+        self.rule_action_type = "update"
+    
+    def _handle_delete_rule(self):
+        """Handle Delete Rule button click"""
+        self.add_message(
+            "Please specify which rule you want to delete.\n\n"
+            "**Examples:**\n"
+            "• 'Delete Clearance+5V+12V rule'\n"
+            "• 'Remove PlaneClearance rule'\n"
+            "• 'Delete Width rule'\n\n"
+            "Type the rule name you want to delete in the chat box below:",
+            is_user=False
+        )
+        # Focus on input
+        self.input_entry.focus()
+        # Set flag to indicate we're waiting for rule input
+        self.waiting_for_rule_input = True
+        self.rule_action_type = "delete"
+    
+    def _process_rule_request(self, user_input: str, action_type: str):
+        """Process rule creation or update request"""
+        self.set_status("Processing rule request...", "warning")
+        self.set_loading(True)
+        
+        def process():
+            try:
+                from tools.altium_script_client import AltiumScriptClient
+                import re
+                
+                # Create client - DO NOT ping before create_rule!
+                # Sending ping immediately before create_rule causes a race condition:
+                # The ping result file may not be fully deleted on Windows before
+                # create_rule's _send_command checks for it, causing create_rule to
+                # read the stale "pong" result and falsely report success.
+                # If Altium isn't running, create_rule will timeout with a clear error.
+                client = AltiumScriptClient()
+                
+                # Parse the rule request
+                rule_data = self._parse_rule_request(user_input, action_type)
+                
+                # DEBUG: Log parsed rule data
+                print(f"DEBUG: _process_rule_request - action_type={action_type}, rule_data={rule_data}")
+                
+                if not rule_data:
+                    # Could not parse - use agent to help
+                    if self.agent:
+                        action_texts = {
+                            "add": "add a new",
+                            "update": "update an existing",
+                            "delete": "delete an existing"
+                        }
+                        action_text = action_texts.get(action_type, "modify a")
+                        prompt = f"User wants to {action_text} design rule. Request: {user_input}\n\n"
+                        prompt += "Please help parse this rule request and provide clear instructions."
+                        
+                        response, status, _ = self.agent.process_query(prompt)
+                        self._safe_after(0, lambda r=response: self.add_message(
+                            f"**Could not automatically parse your rule request.**\n\n"
+                            f"{r}\n\n"
+                            f"**Please try again with a clearer format, for example:**\n"
+                            f"• 'Add clearance rule between +5V and +21V nets with 0.508mm clearance'\n"
+                            f"• 'Update PlaneClearance rule to 0.6mm'",
+                            is_user=False
+                        ))
+                    else:
+                        self._safe_after(0, lambda: self.add_message(
+                            "❌ Could not parse rule request.\n\n"
+                            "**Please use a clear format, for example:**\n"
+                            "• 'Add clearance rule between +5V and +21V nets with 0.508mm clearance'\n"
+                            "• 'Update PlaneClearance rule to 0.6mm'",
+                            is_user=False
+                        ))
+                    self._safe_after(0, lambda: self.set_loading(False))
+                    self._safe_after(0, lambda: self.set_status("Parse Error", "error"))
+                    return
+                
+                # Apply the rule to Altium
+                if action_type == "add":
+                    result = client.create_rule(
+                        rule_data["rule_type"],
+                        rule_data["rule_name"],
+                        rule_data["parameters"]
+                    )
+                elif action_type == "update":
+                    result = client.update_rule(
+                        rule_data["rule_name"],
+                        rule_data["parameters"]
+                    )
+                elif action_type == "delete":
+                    # DEBUG: Log the rule name being sent
+                    rule_name_to_send = rule_data["rule_name"]
+                    
+                    # CRITICAL: Final cleanup - ensure "rule" word and punctuation are not in the name
+                    rule_name_to_send = re.sub(r'\s+rule[.,\s]*$', '', rule_name_to_send, flags=re.IGNORECASE).strip()
+                    rule_name_to_send = rule_name_to_send.rstrip('.,;:!?')
+                    
+                    print(f"DEBUG: About to call delete_rule with rule_name: [{rule_name_to_send}]")
+                    print(f"DEBUG: Rule name length: {len(rule_name_to_send)}")
+                    print(f"DEBUG: Rule name ends with 'rule': {rule_name_to_send.lower().endswith('rule')}")
+                    print(f"DEBUG: Rule name ends with punctuation: {rule_name_to_send[-1] if rule_name_to_send else 'N/A'} in '.,;:!?'")
+                    
+                    result = client.delete_rule(rule_name_to_send)
+                else:
+                    self._safe_after(0, lambda: self.add_message(
+                        f"❌ Unknown action type: {action_type}",
+                        is_user=False
+                    ))
+                    self._safe_after(0, lambda: self.set_loading(False))
+                    return
+                
+                if result.get("success"):
+                    # Rule applied successfully - show Altium's actual response
+                    altium_msg = result.get("message", "OK")
+                    action_past = {
+                        "add": "added",
+                        "update": "updated",
+                        "delete": "deleted"
+                    }.get(action_type, f"{action_type}ed")
+                    
+                    msg = f"✅ Rule {action_past} successfully!\n\n"
+                    msg += f"**Rule:** {rule_data.get('rule_name', 'Unknown')}\n"
+                    if action_type != "delete":
+                        msg += f"**Type:** {rule_data.get('rule_type', 'Unknown')}\n"
+                        msg += f"**Parameters:** {rule_data.get('parameters', {})}\n"
+                    msg += f"**Altium Response:** {altium_msg}\n\n"
+                    if action_type != "delete":
+                        msg += "Exporting updated PCB info and refreshing rules list..."
+                    else:
+                        msg += "Refreshing rules list..."
+                    
+                    self._safe_after(0, lambda m=msg: self.add_message(m, is_user=False))
+                    
+                    # Explicitly call export_pcb_info to ensure the rule change is exported
+                    # Then refresh the UI
+                    self._safe_after(0, lambda: self._export_and_refresh_after_rule_update())
+                else:
+                    error_msg = result.get("error", "Unknown error")
+                    
+                    # Check if it's a "rule not found" error (for delete or update)
+                    if action_type in ["delete", "update"] and ("not found" in error_msg.lower() or "rule not found" in error_msg.lower()):
+                        # Simple message for rule not found
+                        self._safe_after(0, lambda: self.add_message(
+                            f"❌ There is no rule like that. Please check the rule list again.",
+                            is_user=False
+                        ))
+                        # Show rule management buttons again
+                        self._safe_after(0, lambda: self.add_rule_management_buttons())
+                    else:
+                        # For other errors, show detailed troubleshooting
+                        self._safe_after(0, lambda: self.add_message(
+                            f"❌ Error {action_type}ing rule: {error_msg}\n\n"
+                            "**Make sure:**\n"
+                            "1. Altium Designer is open with your PCB\n"
+                            "2. Script server is running (StartServer) in Altium\n"
+                            "3. Rule parameters are valid and unique (for new rules)\n"
+                            "4. File paths match between Python and Altium",
+                            is_user=False
+                        ))
+                    self._safe_after(0, lambda: self.set_status("Error", "error"))
+                
+                self._safe_after(0, lambda: self.set_loading(False))
+                
+            except Exception as e:
+                import traceback
+                error_msg = f"Error processing rule request: {str(e)}"
+                print(traceback.format_exc())
+                self._safe_after(0, lambda: self.add_message(
+                    f"❌ {error_msg}\n\n"
+                    "**Troubleshooting:**\n"
+                    "1. Check if Altium Script Server is running\n"
+                    "2. Make sure PCB is open in Altium\n"
+                    "3. Try a simpler rule request format",
+                    is_user=False
+                ))
+                self._safe_after(0, lambda: self.set_loading(False))
+                self._safe_after(0, lambda: self.set_status("Error", "error"))
+        
+        threading.Thread(target=process, daemon=True).start()
+    
+    def _parse_rule_request(self, user_input: str, action_type: str) -> Optional[Dict[str, Any]]:
+        """Parse rule request from natural language.
+        
+        Uses a simple two-step approach:
+        1. Extract the mm value from the input
+        2. Extract net names (if present) using a separate regex
+        
+        This avoids complex combined regexes that break on word ordering.
+        
+        Supports:
+        - "Add clearance rule between +5V and +21V nets with 0.508mm clearance"
+        - "Add clearance rule 0.508mm"
+        - "Add clearance 0.508mm between +5V and GND"
+        - "Add width rule min 0.5mm, preferred 0.8mm, max 1.0mm"
+        - "Add via rule min hole 0.3mm"
+        - "Update PlaneClearance rule to 0.6mm"
+        """
+        import re
+        
+        user_input_lower = user_input.lower().strip()
+        
+        # ============================================================
+        # DELETE RULES (check first, before update/add patterns)
+        # ============================================================
+        if action_type == "delete":
+            # Pattern to match: "delete Clearance+5V+12V rule" or "remove PlaneClearance"
+            original_input = user_input.strip()
+            
+            # Remove the action word (delete/remove/drop) and "rule" word if present
+            # This is more robust than regex for edge cases
+            temp = re.sub(r'^(?:delete|remove|drop)\s+', '', original_input, flags=re.IGNORECASE).strip()
+            
+            # Remove "rule" word (with optional punctuation after it like . or ,)
+            # Match: "rule", "rule.", "rule,", "rule " etc.
+            rule_name = re.sub(r'\s+rule[.,\s]*$', '', temp, flags=re.IGNORECASE).strip()
+            
+            # Also strip any trailing punctuation that might remain
+            rule_name = rule_name.rstrip('.,;:!?')
+            
+            # DEBUG: Log before normalization
+            print(f"DEBUG: Delete - original_input: [{original_input}]")
+            print(f"DEBUG: Delete - after removing action word: [{temp}]")
+            print(f"DEBUG: Delete - after removing 'rule' and punctuation: [{rule_name}]")
+            
+            # Validate we got something
+            if not rule_name:
+                print(f"DEBUG: Delete - empty rule name after parsing")
+                return None
+            
+            # Normalize rule name to match Altium's format (same as update)
+            # Handle case-insensitive matching for "Clearance"
+            rule_name_lower = rule_name.lower()
+            if rule_name_lower.startswith("clearance") and "+" in rule_name:
+                # Always use "Clearance" with capital C (Altium format)
+                prefix = "Clearance"
+                
+                # Find where "clearance" ends (case-insensitive)
+                clearance_len = len("clearance")
+                rest = rule_name[clearance_len:]
+                
+                # Normalize: add underscores before + signs
+                if "_" not in rest or not re.search(r'_\+\w+_\+\w+', rest):
+                    # Replace "Clearance+" with "Clearance_+"
+                    if rest.startswith("+"):
+                        rest = "_" + rest
+                    # Replace remaining "+" with "_+"
+                    rest = re.sub(r'(?<!_)\+', r'_+', rest)
+                
+                rule_name = prefix + rest
+            
+            # DEBUG: Log after normalization
+            print(f"DEBUG: Delete - final normalized rule_name: [{rule_name}]")
+            
+            return {
+                "rule_type": "unknown",  # Not needed for delete
+                "rule_name": rule_name,
+                "parameters": {}  # Not needed for delete
+            }
+        
+        # ============================================================
+        # UPDATE RULES (check before add patterns)
+        # ============================================================
+        if action_type == "update":
+            # Pattern to match: "update Clearance+5V+12V rule to 0.127mm"
+            # Rule name can contain: letters, numbers, +, -, _, and spaces
+            # We need to capture until we see "rule" or "to/as/with/="
+            
+            # First, try to find the rule name in original case (preserve case)
+            original_input = user_input
+            # Match: "update/change/modify/set" + rule name (with special chars) + "rule" + "to/as/with/=" + value
+            rule_name_match = re.search(
+                r'(?:update|change|modify|set)\s+([^\s]+(?:\s+[^\s]+)*?)\s+(?:rule\s+)?(?:to|as|with|=)\s*(\d+\.?\d*)\s*mm',
+                original_input,
+                re.IGNORECASE
+            )
+            
+            if rule_name_match:
+                rule_name = rule_name_match.group(1).strip()
+                value = float(rule_name_match.group(2))
+                
+                # Normalize rule name to match Altium's format
+                # Rules created with net names use format: "Clearance_+5V_+12V" (with underscores)
+                # But user might type: "Clearance+5V+12V" (with plus signs)
+                # Convert: "Clearance+5V+12V" -> "Clearance_+5V_+12V"
+                if rule_name.startswith("Clearance") and "+" in rule_name:
+                    # Check if it already has underscores (correct format)
+                    if "_" not in rule_name or not re.search(r'Clearance_\+\w+_\+\w+', rule_name):
+                        # Need to normalize: "Clearance+5V+12V" -> "Clearance_+5V_+12V"
+                        # Replace "Clearance+" with "Clearance_+", then replace remaining "+" with "_+"
+                        rule_name = rule_name.replace("Clearance+", "Clearance_+", 1)
+                        # Replace any remaining "+" that aren't already "_+" with "_+"
+                        rule_name = re.sub(r'(?<!_)\+', r'_+', rule_name)
+                
+                # Determine parameter name based on rule name or input context
+                rule_name_lower = rule_name.lower()
+                user_input_lower = user_input.lower()
+                
+                if "clearance" in rule_name_lower or "clear" in rule_name_lower or "clearance" in user_input_lower:
+                    param_name = "clearance_mm"
+                elif "width" in rule_name_lower or "width" in user_input_lower:
+                    param_name = "preferred_width_mm"
+                elif "via" in rule_name_lower or "hole" in rule_name_lower or "via" in user_input_lower or "hole" in user_input_lower:
+                    param_name = "min_hole_mm"
+                else:
+                    param_name = "clearance_mm"  # Default
+                
+                return {
+                    "rule_type": "clearance",
+                    "rule_name": rule_name,
+                    "parameters": {param_name: value}
+                }
+            
+            # Fallback: simpler pattern for basic rule names (no special chars)
+            update_match = re.search(
+                r'(?:update|change|modify|set)\s+(\w+)\s+(?:rule\s+)?(?:to|as|with|=)\s*(\d+\.?\d*)\s*mm',
+                user_input_lower
+            )
+            if update_match:
+                rule_name = update_match.group(1)
+                rule_name = rule_name[0].upper() + rule_name[1:] if rule_name else "Clearance"
+                value = float(update_match.group(2))
+                
+                if "clearance" in rule_name.lower():
+                    param_name = "clearance_mm"
+                elif "width" in rule_name.lower():
+                    param_name = "preferred_width_mm"
+                elif "via" in rule_name.lower() or "hole" in rule_name.lower():
+                    param_name = "min_hole_mm"
+                else:
+                    param_name = "clearance_mm"
+                
+                return {
+                    "rule_type": "clearance",
+                    "rule_name": rule_name,
+                    "parameters": {param_name: value}
+                }
+        
+        # ============================================================
+        # CLEARANCE RULES - Simple two-step approach
+        # ============================================================
+        if 'clearance' in user_input_lower or 'clear' in user_input_lower:
+            # Step 1: Extract the mm value (required)
+            value_match = re.search(r'(\d+\.?\d*)\s*mm', user_input_lower)
+            if not value_match:
+                return None
+            clearance_mm = float(value_match.group(1))
+            
+            # Step 2: Extract net names (optional) - look for "X and Y" pattern
+            nets_match = re.search(
+                r'(?:between\s+)?([+\-]?\w+[\w.]*)\s+(?:and|&)\s+([+\-]?\w+[\w.]*)',
+                user_input_lower
+            )
+            
+            net1, net2 = "All", "All"
+            if nets_match:
+                candidate1 = nets_match.group(1).upper()
+                candidate2 = nets_match.group(2).upper()
+                # Filter out keywords that aren't net names
+                keywords = {'MIN', 'MAX', 'MINIMUM', 'MAXIMUM', 'PREFERRED', 'PREF',
+                           'RULE', 'CLEARANCE', 'CLEAR', 'ADD', 'UPDATE', 'WITH',
+                           'BETWEEN', 'NETS', 'NET', 'THE', 'FOR', 'SET'}
+                if candidate1 not in keywords and candidate2 not in keywords:
+                    net1 = candidate1
+                    net2 = candidate2
+            
+            if net1 == "All" and net2 == "All":
+                rule_name = f"Clearance_{clearance_mm}mm"
+            else:
+                rule_name = f"Clearance_{net1}_{net2}"
+            
+            return {
+                "rule_type": "clearance",
+                "rule_name": rule_name,
+                "parameters": {
+                    "clearance_mm": clearance_mm,
+                    "scope_first": net1,
+                    "scope_second": net2
+                }
+            }
+        
+        # ============================================================
+        # WIDTH RULES
+        # ============================================================
+        if 'width' in user_input_lower or 'trace' in user_input_lower:
+            # Extract min/preferred/max values
+            min_match = re.search(r'min(?:imum)?\s+(\d+\.?\d*)\s*mm', user_input_lower)
+            pref_match = re.search(r'(?:preferred?|pref)\s+(\d+\.?\d*)\s*mm', user_input_lower)
+            max_match = re.search(r'max(?:imum)?\s+(\d+\.?\d*)\s*mm', user_input_lower)
+            
+            # Fallback: just find any mm value
+            any_val = re.search(r'(\d+\.?\d*)\s*mm', user_input_lower)
+            
+            if min_match or pref_match or max_match or any_val:
+                min_w = float(min_match.group(1)) if min_match else (float(any_val.group(1)) if any_val else 0.254)
+                pref_w = float(pref_match.group(1)) if pref_match else min_w
+                max_w = float(max_match.group(1)) if max_match else pref_w * 2
+                
+                # Try to extract scope/net class - support net names with + and - signs
+                scope_match = re.search(r'for\s+([+\-]?\w+[\w.]*)\s+(?:power\s+)?nets?', user_input_lower)
+                if not scope_match:
+                    # Try alternative patterns: "on X net" or "X net width"
+                    scope_match = re.search(r'(?:on|to)\s+([+\-]?\w+[\w.]*)\s+nets?', user_input_lower)
+                if not scope_match:
+                    # Try pattern without "net" word: "for +5V" or "for VCC"
+                    scope_match = re.search(r'for\s+([+\-]?\w+[\w.]*)', user_input_lower)
+                
+                scope = scope_match.group(1).upper() if scope_match else "All"
+                
+                # Map common power net names to actual net names
+                # The Altium script will format these as InNet('VCC') etc.
+                power_net_map = {
+                    'power': 'VCC',  # Default power net name
+                    'vcc': 'VCC',
+                    'vdd': 'VDD',
+                    'ground': 'GND',
+                    'gnd': 'GND',
+                    'vss': 'VSS'
+                }
+                
+                # Normalize scope name - but preserve original if it starts with + or -
+                scope_lower = scope.lower()
+                if scope_lower in power_net_map:
+                    scope = power_net_map[scope_lower]
+                # If scope already starts with + or -, keep it as-is (it's likely a net name like +5V)
+                # Otherwise, check if it needs mapping
+                
+                rule_name = f"Width_{scope}" if scope != "All" else "Width_Rule"
+                return {
+                    "rule_type": "width",
+                    "rule_name": rule_name,
+                    "parameters": {
+                        "min_width_mm": min_w,
+                        "preferred_width_mm": pref_w,
+                        "max_width_mm": max_w,
+                        "scope": scope  # Will be formatted as InNet('VCC') in Altium script
+                    }
+                }
+        
+        # ============================================================
+        # VIA RULES
+        # ============================================================
+        if 'via' in user_input_lower:
+            min_hole_match = re.search(r'min\s+hole\s+(\d+\.?\d*)\s*mm', user_input_lower)
+            max_hole_match = re.search(r'max\s+hole\s+(\d+\.?\d*)\s*mm', user_input_lower)
+            min_dia_match = re.search(r'min\s+diameter\s+(\d+\.?\d*)\s*mm', user_input_lower)
+            max_dia_match = re.search(r'max\s+diameter\s+(\d+\.?\d*)\s*mm', user_input_lower)
+            
+            any_val = re.search(r'(\d+\.?\d*)\s*mm', user_input_lower)
+            
+            if min_hole_match or max_hole_match or min_dia_match or max_dia_match or any_val:
+                min_hole = float(min_hole_match.group(1)) if min_hole_match else (float(any_val.group(1)) if any_val else 0.3)
+                max_hole = float(max_hole_match.group(1)) if max_hole_match else min_hole * 1.5
+                min_dia = float(min_dia_match.group(1)) if min_dia_match else min_hole * 2
+                max_dia = float(max_dia_match.group(1)) if max_dia_match else min_dia * 1.5
+                
+                # Try to extract scope/net class - support net names with + and - signs
+                scope_match = re.search(r'for\s+([+\-]?\w+[\w.]*)\s+nets?', user_input_lower)
+                if not scope_match:
+                    # Try alternative patterns: "on X net" or "X net via"
+                    scope_match = re.search(r'(?:on|to)\s+([+\-]?\w+[\w.]*)\s+nets?', user_input_lower)
+                if not scope_match:
+                    # Try pattern without "net" word: "for +5V" or "for VCC"
+                    scope_match = re.search(r'for\s+([+\-]?\w+[\w.]*)', user_input_lower)
+                
+                scope = scope_match.group(1).upper() if scope_match else "All"
+                
+                rule_name = f"RoutingVias_{scope}" if scope != "All" else "RoutingVias_Custom"
+                
+                return {
+                    "rule_type": "via",
+                    "rule_name": rule_name,
+                    "parameters": {
+                        "min_hole_mm": min_hole,
+                        "max_hole_mm": max_hole,
+                        "min_diameter_mm": min_dia,
+                        "max_diameter_mm": max_dia,
+                        "scope": scope
+                    }
+                }
+        
+        # ============================================================
+        # FALLBACK: Extract ANY number with mm and guess rule type
+        # ============================================================
+        mm_match = re.search(r'(\d+\.?\d*)\s*mm', user_input_lower)
+        if mm_match:
+            value_mm = float(mm_match.group(1))
+            # Default to clearance rule
+            return {
+                "rule_type": "clearance",
+                "rule_name": f"Clearance_{value_mm}mm",
+                "parameters": {
+                    "clearance_mm": value_mm,
+                    "scope_first": "All",
+                    "scope_second": "All"
+                }
+            }
+        
+        return None
+    
+    def _export_and_refresh_after_rule_update(self):
+        """Refresh rules display after rule update.
+        
+        The Altium server auto-exports after rule creation/update in silent mode.
+        We just need to wait for the export to complete and then refresh the UI.
+        No need to call export_pcb_info again (that would show a dialog and timeout).
+        """
+        try:
+            import time
+            
+            # Wait for Altium's auto-export to complete
+            # The create_rule command already triggers ExportPCBInfo in silent mode
+            # We just need to wait for the file to be written
+            self._safe_after(0, lambda: self.add_message(
+                "Waiting for Altium export to complete...",
+                is_user=False
+            ))
+            
+            # Wait longer to ensure the export file is fully written
+            # Altium needs time to: save PCB, refresh board, export JSON
+            # Also wait for file to be fully flushed to disk
+            import os
+            from pathlib import Path
+            
+            # Check PCB_Project folder first, then root
+            pcb_info_file = Path("PCB_Project") / "altium_pcb_info.json"
+            if not pcb_info_file.exists():
+                pcb_info_file = Path("altium_pcb_info.json")
+            if pcb_info_file.exists():
+                # Wait until file modification time is recent (within last 5 seconds)
+                initial_mtime = pcb_info_file.stat().st_mtime
+                for _ in range(10):  # Wait up to 5 seconds
+                    time.sleep(0.5)
+                    current_mtime = pcb_info_file.stat().st_mtime
+                    if current_mtime > initial_mtime:
+                        # File was updated, wait a bit more for it to be fully written
+                        time.sleep(1.0)
+                        break
+                else:
+                    # File wasn't updated, wait anyway
+                    time.sleep(2.0)
+            else:
+                # File doesn't exist yet, wait longer
+                time.sleep(5.0)
+            
+            # Refresh rules display from the auto-exported file
+            self._view_design_rules()
+            
+        except Exception as e:
+            import traceback
+            print(f"Error in _export_and_refresh_after_rule_update: {e}")
+            print(traceback.format_exc())
+            # Fallback: just try to refresh anyway
+            try:
+                time.sleep(2.0)
+                self._view_design_rules()
             except:
-                # Fallback to webbrowser
-                file_url = "file:///" + str(report_path).replace("\\", "/")
-                webbrowser.open(file_url)
-        else:
-            # Show message if report doesn't exist
-            self.add_message("DRC report not found. Run DRC in Altium Designer first (Tools → Design Rule Check).", is_user=False)
+                pass
+    
+    def _refresh_rules_after_update(self):
+        """Refresh rules display after rule update.
+        
+        NOTE: The Altium server now auto-saves and auto-exports after
+        rule creation/update, so we just need to reload the local JSON.
+        No need to ping or re-export (that would block the server).
+        """
+        try:
+            import time
+            # Brief wait for the exported JSON file to be fully written
+            time.sleep(1.0)
+            
+            # Refresh rules display from the already-exported file
+            self._view_design_rules()
+            
+        except Exception as e:
+            self.add_message(
+                f"Rule applied but could not refresh automatically.\n"
+                f"Please click 'View Design Rules' to see the updated rules.\n\n"
+                f"Error: {str(e)}",
+                is_user=False
+            )
     
     def _show_confirmation_modal(self, message: str):
         """Show confirmation modal dialog"""
