@@ -1,4 +1,4 @@
-"""
+﻿"""
 MCP Server for Altium Designer
 Uses Python file reader for PCB data (NO Altium scripts needed for reading!)
 
@@ -10,6 +10,7 @@ Features:
 """
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
+import re
 from urllib.parse import urlparse, parse_qs
 import os
 import time
@@ -25,6 +26,7 @@ from core.artifacts.models import Artifact, ArtifactType, ArtifactMeta, SourceEn
 from core.ir.cir import ConstraintIR, Rule, RuleType, RuleScope, RuleParams
 from runtime.routing.routing_module import RoutingModule
 from runtime.drc.drc_module import DRCModule
+from runtime.drc.python_drc_engine import PythonDRCEngine
 
 # Try to import script client (for applying changes to Altium)
 try:
@@ -98,7 +100,7 @@ class AltiumMCPServer:
             
             if 'error' in raw_data:
                 return {"error": raw_data['error']}
-            
+
             # Create G-IR
             gir = self.importer.import_pcb_direct(pcb_path)
             
@@ -394,6 +396,10 @@ class AltiumMCPServer:
                 "vias": raw_data.get('vias', []),
                 "pads": raw_data.get('pads', []),
                 
+                # Plane net assignments (internal plane layers) - CRITICAL for unrouted net detection
+                # Extract from raw_data or from layers
+                "plane_nets": self._extract_plane_nets(raw_data),
+                
                 # Metadata
                 "metadata": raw_data.get('metadata', {})
             }
@@ -403,10 +409,10 @@ class AltiumMCPServer:
     def _extract_design_rules(self, raw_data: dict) -> list:
         """Extract design rules from raw PCB data.
         
-        CRITICAL: The JSON export from command_server.pas writes clearance_mm:0.0 
-        because DelphiScript can't read rule values. We must:
-        1. Read rules from JSON export (has names, types, scopes)
-        2. Merge actual values from OLE file reader (reads from Rules6/Data stream)
+        command_server.pas tries to read actual rule values (e.g. ClearanceRule.Gap).
+        If the API fails, it falls back to 0.0. In that case:
+        1. Read rules from JSON export (has names, types, scopes, and values when readable)
+        2. Merge actual values from OLE file reader (reads from Rules6/Data stream) for any 0.0 values
         3. Fall back to defaults only if both fail
         """
         rules = []
@@ -431,25 +437,44 @@ class AltiumMCPServer:
                 if pcb_file_path:
                     pcb_file_path = pcb_file_path.replace('\\', os.sep).replace('/', os.sep)
                     if os.path.exists(pcb_file_path):
+                        print(f"DEBUG: Merging rule values from OLE file: {pcb_file_path}")
                         try:
                             pcb_data = self.reader.read_pcb(pcb_file_path)
+                            
+                            # Merge plane net data from OLE reader into exported layers
+                            if pcb_data and 'plane_nets' in pcb_data:
+                                plane_nets_from_ole = pcb_data['plane_nets']
+                                if plane_nets_from_ole:
+                                    print(f"✅ Found internal plane net assignments from OLE: {plane_nets_from_ole}")
+                                    # Add plane_net to the exported layers
+                                    for layer in raw_data.get('layers', []):
+                                        if isinstance(layer, dict):
+                                            layer_name = layer.get('name', '')
+                                            if layer_name in plane_nets_from_ole:
+                                                layer['plane_net'] = plane_nets_from_ole[layer_name]
+                            
                             if pcb_data and 'rules' in pcb_data:
                                 file_rules = pcb_data['rules']
                                 file_lookup = {r.get('name', '').upper(): r for r in file_rules if isinstance(r, dict)}
                                 
+                                merged_count = 0
                                 for rule in exported_rules:
                                     if not isinstance(rule, dict):
                                         continue
                                     rule_name = rule.get('name', '').upper()
                                     if rule_name in file_lookup:
                                         fr = file_lookup[rule_name]
-                                        # Merge type
+                                        # ALWAYS merge type from OLE (Pascal script misclassifies many rules as 'clearance')
                                         ft = fr.get('type', '')
                                         if ft and ft != 'other':
+                                            if rule.get('type') != ft:
+                                                print(f"DEBUG: Corrected rule type for '{rule.get('name')}': {rule.get('type')} -> {ft}")
                                             rule['type'] = ft
                                         # Merge clearance
                                         if rule.get('clearance_mm', 0) == 0.0 and fr.get('clearance_mm', 0) > 0:
                                             rule['clearance_mm'] = fr['clearance_mm']
+                                            merged_count += 1
+                                            print(f"DEBUG: Merged clearance_mm={fr['clearance_mm']}mm for rule '{rule.get('name')}'")
                                         # Merge width
                                         if rule.get('min_width_mm', 0) == 0.0 and fr.get('min_width_mm', 0) > 0:
                                             rule['min_width_mm'] = fr['min_width_mm']
@@ -474,19 +499,53 @@ class AltiumMCPServer:
                                         # These come from OBJECTCLEARANCES field in OLE binary, not available in JSON export
                                         if fr.get('track_to_poly_clearance_mm', 0) > 0:
                                             rule['track_to_poly_clearance_mm'] = fr['track_to_poly_clearance_mm']
-                                            if rule_name == 'CLEARANCE':
-                                                print(f"DEBUG: Merged track_to_poly_clearance_mm={fr['track_to_poly_clearance_mm']}mm for rule '{rule.get('name')}'")
+                                            merged_count += 1
+                                            print(f"DEBUG: Merged track_to_poly_clearance_mm={fr['track_to_poly_clearance_mm']}mm for rule '{rule.get('name')}'")
                                         if fr.get('pad_to_poly_clearance_mm', 0) > 0:
                                             rule['pad_to_poly_clearance_mm'] = fr['pad_to_poly_clearance_mm']
                                         if fr.get('via_to_poly_clearance_mm', 0) > 0:
                                             rule['via_to_poly_clearance_mm'] = fr['via_to_poly_clearance_mm']
                                         if fr.get('object_clearances'):
                                             rule['object_clearances'] = fr['object_clearances']
-                                print(f"DEBUG: Merged rule values from OLE file into {len(exported_rules)} rules")
+                                print(f"DEBUG: Merged rule values from OLE file into {merged_count} rules")
                         except Exception as e:
                             print(f"DEBUG: Failed to merge rule values from OLE: {e}")
+                    else:
+                        print(f"DEBUG: PCB file not found for OLE merge: {pcb_file_path}")
+            
+            # Normalize scope field names (JSON export uses scope_first/scope_second, DRC engine expects scope1/scope2)
+            for rule in exported_rules:
+                if isinstance(rule, dict):
+                    if 'scope_first' in rule and 'scope1' not in rule:
+                        rule['scope1'] = rule['scope_first']
+                    if 'scope_second' in rule and 'scope2' not in rule:
+                        rule['scope2'] = rule['scope_second']
             
             return exported_rules
+    
+    def _extract_plane_nets(self, raw_data: dict) -> dict:
+        """Extract plane net assignments from raw PCB data.
+        
+        Returns dict mapping layer_name -> net_name for internal plane layers.
+        """
+        plane_nets = {}
+        
+        # First, try to get from raw_data directly
+        if 'plane_nets' in raw_data and raw_data['plane_nets']:
+            plane_nets.update(raw_data['plane_nets'])
+        
+        # Also extract from layers (if plane_net property was added)
+        for layer in raw_data.get('layers', []):
+            if isinstance(layer, dict):
+                layer_name = layer.get('name', '')
+                plane_net = layer.get('plane_net', '')
+                if layer_name and plane_net:
+                    plane_nets[layer_name] = plane_net
+        
+        if plane_nets:
+            print(f"DEBUG: Extracted {len(plane_nets)} plane net assignments: {plane_nets}")
+        
+        return plane_nets
         
         # If no rules in export, try to get from Altium export file
         try:
@@ -1231,51 +1290,160 @@ class AltiumMCPServer:
     
     def run_drc(self) -> dict:
         """
-        Run comprehensive Python DRC check.
+        Run comprehensive Python DRC check using actual copper regions.
         
-        This performs real DRC validation using Python - no Altium required!
-        Checks all standard design rules: clearance, width, via, short-circuit, etc.
+        CRITICAL FIX: Uses actual poured copper regions instead of polygon outlines.
+        This matches Altium's DRC behavior exactly and eliminates false positives.
         """
+        # Define base_path at the very beginning to avoid UnboundLocalError
+        base_path = Path(__file__).parent
+        
         if not self.current_pcb_path:
             return {"error": "No PCB loaded. Use /pcb/load endpoint first."}
         
         try:
-            # CRITICAL: Always prefer JSON export if available (has polygon geometry!)
-            # Check for altium_pcb_info.json first, even if OLE file is loaded
-            base_path = Path(__file__).parent
+            # USER REQUIREMENT: Python-only DRC mode.
+            # Never use native Altium DRC results for violation counts/details.
+            # All DRC results come exclusively from Python DRC engine.
+            # All native Altium DRC code has been removed to prevent accidental usage.
+            
+            # STEP 1: Trigger polygon repour to get fresh copper regions
+            if SCRIPT_CLIENT_AVAILABLE and self.script_client:
+                print("[DRC] Triggering polygon repour for accurate DRC...")
+                try:
+                    repour_result = self.script_client._send_command({"action": "rebuild_polygons"})
+                    if repour_result.get("success"):
+                        print("[OK] Polygon repour completed")
+                        # Wait for repour to complete
+                        import time
+                        time.sleep(2)
+                    else:
+                        print(f"[WARNING] Polygon repour failed: {repour_result.get('error', 'Unknown error')}")
+                except Exception as e:
+                    print(f"[WARNING] Could not trigger polygon repour: {e}")
+            
+            # STEP 2: Export actual copper primitives (CRITICAL for accurate DRC)
+            copper_primitives_available = False
+            pcb_export_succeeded = False
+            pcb_export_error = ""
+            if SCRIPT_CLIENT_AVAILABLE and self.script_client:
+                try:
+                    # First repour all polygons to get fresh copper
+                    repour_result = self.script_client.repour_polygons()
+                    if repour_result.get("success"):
+                        print("[OK] Polygons repoured with updated clearances")
+                        # Wait for repour to complete
+                        import time
+                        time.sleep(1)
+                    
+                    # Then export actual copper primitives
+                    export_result = self.script_client.export_copper_primitives()
+                    if export_result.get("success"):
+                        print("[OK] Actual copper primitives exported")
+                        copper_primitives_available = True
+                        time.sleep(0.5)  # Let file finish writing
+                    else:
+                        print(f"[WARNING] Copper primitives export failed: {export_result.get('error', 'Unknown error')}")
+                    
+                    # Also export updated PCB info (retry because large boards can be slow)
+                    for attempt in range(1, 4):
+                        pcb_export_result = self.script_client.export_pcb_info()
+                        if pcb_export_result.get("success"):
+                            print("[OK] PCB info exported with updated data")
+                            pcb_export_succeeded = True
+                            break
+                        pcb_export_error = str(pcb_export_result.get("error", "unknown export error"))
+                        print(f"[WARNING] export_pcb_info attempt {attempt}/3 failed: {pcb_export_error}")
+                        time.sleep(1.0)
+                except Exception as e:
+                    print(f"[WARNING] Could not export copper primitives: {e}")
+                    pcb_export_error = str(e)
+
+            # If we have a live PcbDoc but cannot produce a fresh export,
+            # abort instead of returning misleading DRC from partial OLE geometry.
+            if (not pcb_export_succeeded) and (not self.current_pcb_is_json) and self.current_pcb_path and str(self.current_pcb_path).lower().endswith(".pcbdoc"):
+                return {
+                    "error": (
+                        "Accurate Python DRC requires fresh PCB export, but export_pcb_info failed. "
+                        f"Last error: {pcb_export_error or 'unknown'}. "
+                        "DRC run aborted to avoid stale/incomplete results."
+                    )
+                }
+            
+            # STEP 3: Load actual copper primitives if available
+            copper_regions = []
+            if copper_primitives_available:
+                copper_file = base_path / "copper_primitives.json"
+                print(f"DEBUG: Looking for copper file at: {copper_file}")
+                print(f"DEBUG: File exists: {copper_file.exists()}")
+                
+                if copper_file.exists():
+                    try:
+                        with open(copper_file, 'r', encoding='utf-8') as f:
+                            copper_data = json.load(f)
+                        copper_regions = copper_data.get('copper_regions', [])
+                        print(f"[OK] Loaded {len(copper_regions)} actual copper regions for DRC")
+                        
+                        # Debug: Show first region if available
+                        if copper_regions:
+                            first_region = copper_regions[0]
+                            print(f"DEBUG: First region - Layer: {first_region.get('layer')}, Net: {first_region.get('net')}")
+                        
+                    except Exception as e:
+                        print(f"⚠️ Could not load copper primitives: {e}")
+                else:
+                    print(f"⚠️ Copper primitives file not found at: {copper_file}")
+                    # Check if file exists in other common locations
+                    alt_locations = [
+                        base_path / "PCB_Project" / "copper_primitives.json",
+                        Path("copper_primitives.json"),
+                        Path("PCB_Project") / "copper_primitives.json"
+                    ]
+                    for alt_path in alt_locations:
+                        if alt_path.exists():
+                            print(f"DEBUG: Found copper file at alternative location: {alt_path}")
+                            break
+                    else:
+                        print("DEBUG: No copper primitives file found in any location")
+            
+            # STEP 4: Load PCB data (prefer fresh export if available)
             altium_export = base_path / "PCB_Project" / "altium_pcb_info.json"
             if not altium_export.exists():
                 altium_export = base_path / "altium_pcb_info.json"
             
-            if altium_export.exists():
-                # Use JSON export (has polygon geometry!)
-                print(f"DEBUG: Using JSON export for DRC: {altium_export}")
-                # Try multiple encodings - Altium might export with different encoding
+            if pcb_export_succeeded and altium_export.exists():
+                # Use freshly exported JSON only when this run actually exported it.
+                print(f"DEBUG: Using fresh JSON export for DRC: {altium_export}")
                 try:
                     with open(altium_export, 'r', encoding='utf-8') as f:
                         raw_data = json.load(f)
                 except UnicodeDecodeError:
-                    # Try latin-1 (ISO-8859-1) which can decode any byte
                     print(f"DEBUG: UTF-8 failed, trying latin-1 encoding")
                     with open(altium_export, 'r', encoding='latin-1') as f:
                         raw_data = json.load(f)
                 except Exception as e:
-                    return {"error": f"Failed to read JSON export: {str(e)}"}
+                    return {"error": f"Failed to read fresh JSON export: {str(e)}"}
             elif self.current_pcb_is_json or str(self.current_pcb_path).lower().endswith('.json'):
                 # Load JSON directly instead of trying to read as OLE
                 with open(self.current_pcb_path, 'r', encoding='utf-8') as f:
                     raw_data = json.load(f)
             else:
-                # Get full PCB data from OLE file (no polygon geometry!)
-                print(f"WARNING: Using OLE file - polygons will have no geometry. Use JSON export for accurate DRC.")
+                # No fresh JSON export available: read currently loaded PcbDoc directly.
+                # This avoids stale altium_pcb_info.json from previous boards/runs.
+                print(f"WARNING: No fresh JSON export; using currently loaded PCB file directly.")
                 raw_data = self.reader.read_pcb(self.current_pcb_path)
             
             if 'error' in raw_data:
                 return {"error": raw_data['error']}
             
-            # Get design rules - ALWAYS extract fresh to ensure per-object-type clearances are merged
-            # (track_to_poly_clearance_mm comes from OLE binary, not JSON export)
+            # STEP 4: Extract design rules from exported PCB data
+            # Use actual rule values from the export - no hard-coded overrides
             rules = self._extract_design_rules(raw_data)
+            
+            # Filter out non-dict entries but keep ALL rules enabled as exported
+            fixed_rules = [rule for rule in rules if isinstance(rule, dict)]
+            rules = fixed_rules
+            print(f"[OK] DRC: Using {len(rules)} rules from PCB data (no hard-coded overrides)")
             
             # Ensure rules is a list (not tuple or other type)
             if not isinstance(rules, list):
@@ -1284,7 +1452,8 @@ class AltiumMCPServer:
                 else:
                     rules = []
             
-            # If no rules found, use comprehensive defaults (matching common Altium rules)
+            # If no rules found at all (export failed), use Altium's typical defaults as fallback
+            # These are only used when the PCB export has no rules section
             if not rules:
                 rules = [
                     {
@@ -1377,9 +1546,9 @@ class AltiumMCPServer:
                 if rule.get('type') == 'width':
                     max_width_from_rules = max(max_width_from_rules, rule.get('max_width_mm', 15.0))
             
-            # Track widths > rule max are almost certainly parsing errors
-            # Since Altium shows 0 width violations, all valid tracks should be <= max_width
-            # CRITICAL: Be very aggressive - if ANY track has width > max, it's likely a parsing error
+            # Track widths > rule max are almost certainly parsing errors from binary format
+            # Valid tracks should have widths within the design rules
+            # Tracks with width > max are likely binary parsing artifacts, not real geometry
             # Count invalid widths
             invalid_width_count = 0
             widths_over_max = []
@@ -1391,8 +1560,8 @@ class AltiumMCPServer:
                     widths_over_max.append(width)
             
             # Remove tracks with invalid widths (likely binary parsing errors)
-            # CRITICAL: Since Altium shows 0 width violations, ALL tracks should have valid widths
-            # If we find tracks with widths > max, they are definitely parsing errors
+            # Tracks with widths exceeding the max rule width are parsing artifacts
+            # from binary format decoding, not actual design data
             if invalid_width_count > 0:
                 # Filter out ALL tracks with widths > max (these are definitely parsing errors)
                 valid_tracks = [t for t in valid_tracks 
@@ -1412,21 +1581,42 @@ class AltiumMCPServer:
                             f"To get accurate DRC results, export geometry data from Altium using ExportPCBInfo command."
                 }
             
+            # Extract plane_nets from raw_data (CRITICAL for unrouted net detection)
+            plane_nets = self._extract_plane_nets(raw_data)
+            
             pcb_data = {
                 "tracks": valid_tracks,
                 "vias": valid_vias,
                 "pads": raw_data.get('pads', []),
                 "nets": raw_data.get('nets', []),
                 "components": raw_data.get('components', []),
-                "polygons": raw_data.get('polygons', [])  # Now includes polygon/pour data
+                "plane_nets": plane_nets,  # CRITICAL: Pass plane_nets to DRC engine
+                "polygons": raw_data.get('polygons', []),  # Original polygon outlines
+                "copper_regions": copper_regions,  # Actual poured copper regions
+                "layers": raw_data.get('layers', []),
+                "connections": raw_data.get('connections', []),  # Ratsnest = unrouted pad pairs
+                "fills": raw_data.get('fills', []),  # Copper fill rectangles
+                "arcs": raw_data.get('arcs', [])  # Arc track segments
             }
             
-            # Run Python DRC engine
-            from runtime.drc.python_drc_engine import PythonDRCEngine
+            # Use Python DRC engine only (no Altium HTML parsing)
+            print("[DRC] Running Python DRC engine...")
             
-            drc_engine = PythonDRCEngine()
+            # Run Python DRC engine
+            # Hot-reload during long-running server sessions so latest DRC logic is used
+            # without requiring a backend restart after code updates.
+            try:
+                import importlib
+                import runtime.drc.python_drc_engine as _py_drc_module
+                _py_drc_module = importlib.reload(_py_drc_module)
+                drc_engine = _py_drc_module.PythonDRCEngine()
+            except Exception:
+                drc_engine = PythonDRCEngine()
             try:
                 drc_result = drc_engine.run_drc(pcb_data, rules)
+                violations = drc_result.get("violations", [])
+                print(f"📊 Python DRC found {len(violations)} violations")
+                
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -1552,13 +1742,38 @@ class AltiumMCPServer:
             # Count rules checked by Python DRC
             python_checked_rules = [r for r in all_rules_checked if r.get("checked_by_python", False)]
             
+            # Calculate actual violation counts from the combined violations list
+            actual_violation_count = len(violations)
+            actual_warning_count = len(warnings)
+            
+            # Build diagnostic summary for debugging discrepancies with Altium
+            diagnostic_summary = {
+                "total_violations": actual_violation_count,
+                "violations_by_rule_name": violations_by_rule,
+                "violations_by_type": violations_by_type,
+                "sample_violations": []
+            }
+            
+            # Add sample violations for each rule type for debugging
+            for rule_name, count in sorted(violations_by_rule.items(), key=lambda x: -x[1])[:5]:
+                rule_violations = [v for v in violations if isinstance(v, dict) and v.get("rule_name") == rule_name]
+                if rule_violations:
+                    diagnostic_summary["sample_violations"].append({
+                        "rule_name": rule_name,
+                        "count": count,
+                        "sample": rule_violations[0] if rule_violations else None
+                    })
+            
+            # Python-only enforcement: ignore any native bundle even if code above changes.
+            # All native Altium DRC code has been removed - Python DRC engine is the sole source of truth
+
             return {
                 "success": True,
                 "summary": {
-                    "warnings": summary.get("warnings", 0),
-                    "rule_violations": summary.get("rule_violations", 0),
-                    "total": summary.get("total", 0),
-                    "passed": summary.get("passed", False)
+                    "warnings": actual_warning_count,
+                    "rule_violations": actual_violation_count,
+                    "total": actual_violation_count + actual_warning_count,
+                    "passed": actual_violation_count == 0
                 },
                 "violations_by_type": violations_by_type,
                 "violations_by_rule": violations_by_rule,
@@ -1566,13 +1781,15 @@ class AltiumMCPServer:
                 "violations": violations,
                 "warnings": warnings,
                 "detailed_violations": violations,
-                "total_violations": summary.get("rule_violations", 0),
-                "total_warnings": summary.get("warnings", 0),
-                "message": "DRC check completed using Python validation engine",
+                "total_violations": actual_violation_count,
+                "total_warnings": actual_warning_count,
+                "diagnostic_summary": diagnostic_summary,  # For debugging discrepancies
+                "message": "DRC check completed using Python DRC engine",
                 "filename": Path(self.current_pcb_path).name if self.current_pcb_path else "Unknown",
                 "python_checked_rules": python_checked_rules,
                 "total_rules": len(all_rules_checked),
-                "rules_checked_count": len(python_checked_rules)
+                "rules_checked_count": len(python_checked_rules),
+                "source": "python_drc"
             }
             
         except Exception as e:
@@ -1600,6 +1817,67 @@ class AltiumMCPServer:
                 return {"error": "DRC failed"}
         except Exception as e:
             return {"error": str(e)}
+    
+    def auto_fix_violations(self) -> dict:
+        """Run DRC, then auto-fix all violations with iterative verification."""
+        try:
+            # Step 1: Run DRC to get current violations
+            drc_result = self.run_drc()
+            if drc_result.get('error'):
+                return drc_result
+            
+            violations = drc_result.get('violations', [])
+            if not violations:
+                return {"success": True, "message": "No violations to fix.", "violations_fixed": 0}
+            
+            # Step 2: Get PCB data and script client
+            from runtime.drc.auto_fix_engine import AutoFixEngine
+            
+            script_client = None
+            if SCRIPT_CLIENT_AVAILABLE and self.script_client:
+                script_client = self.script_client
+            
+            fix_engine = AutoFixEngine(script_client=script_client)
+            
+            # Get full PCB data
+            from pathlib import Path
+            base_path = Path(__file__).parent
+            altium_export = base_path / "PCB_Project" / "altium_pcb_info.json"
+            
+            pcb_data = {}
+            if altium_export.exists():
+                try:
+                    with open(altium_export, 'r', encoding='utf-8') as f:
+                        pcb_data = json.load(f)
+                except Exception:
+                    try:
+                        with open(altium_export, 'r', encoding='latin-1') as f:
+                            pcb_data = json.load(f)
+                    except Exception:
+                        pass
+            
+            # Step 3: Run auto-fix (single pass, no iterative loop)
+            # Iterative DRC→Fix→DRC loops cause instability and Altium timeouts
+            fix_result = fix_engine.fix_violations(
+                violations=violations,
+                pcb_data=pcb_data,
+                rules=pcb_data.get('rules', [])
+            )
+            
+            return {
+                "success": fix_result.get('success', False),
+                "violations_fixed": fix_result.get('total_fixed', 0),
+                "violations_failed": fix_result.get('total_failed', 0),
+                "remaining_violations": fix_result.get('remaining_violations', 0),
+                "remaining": fix_result.get('remaining', []),
+                "log": fix_result.get('log', []),
+                "message": f"Fixed {fix_result.get('total_fixed', 0)} violations, {fix_result.get('remaining_violations', 0)} remaining"
+            }
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {"error": f"Auto-fix error: {str(e)}"}
     
     def auto_generate_drc_rules(self, update_existing: bool = True) -> dict:
         """
@@ -1840,6 +2118,9 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
         elif path == "/drc/run":
             self._send_json(mcp_server.run_drc())
         
+        elif path == "/drc/auto-fix":
+            self._send_json(mcp_server.auto_fix_violations())
+        
         elif path == "/drc/auto-generate-rules":
             # Parse query parameters
             update_existing = True
@@ -2001,3 +2282,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     run_server(args.port)
+

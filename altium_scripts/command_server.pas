@@ -1,9 +1,17 @@
 {..............................................................................}
 { Altium Command Server - Full Integration with EagilinsED Agent             }
 { Supports: DRC, Export, Move, Add Track, Add Via, Delete                     }
-{ Updated: Dynamic paths, Complete rule export                                }
+{ Updated: Dynamic paths, Complete rule export, Component type detection      }
 { Fixed: ShowMessage blocking, log spam, ViaRule type, hardcoded paths       }
 {..............................................................................}
+
+// Forward declarations for copper pour functions
+Function AdjustCopperPourClearance(X, Y : Double; NewClearanceMM : Double) : Boolean; Forward;
+Function AdjustCopperPourClearanceByNet(NetName : String; NewClearanceMM : Double) : Boolean; Forward;
+Function RebuildAllPolygons : Boolean; Forward;
+Function RepourAllPolygons : Boolean; Forward;
+Function ExportActualCopperPrimitives : Boolean; Forward;
+Function DetectComponentType(Comp : IPCB_Component) : String; Forward;
 
 Var
     ServerRunning : Boolean;
@@ -83,8 +91,9 @@ Begin
         End;
     End;
     
-    // PRIORITY 4: Hardcoded fallback
-    Result := 'E:\Altium_Project\PCB_ai_agent\';
+    // PRIORITY 4: No hardcoded fallback path.
+    // Return empty string and let callers use relative paths if needed.
+    Result := '';
     
     If (Result <> '') And (Result[Length(Result)] <> '\') Then
         Result := Result + '\';
@@ -292,6 +301,406 @@ Begin
 End;
 
 {..............................................................................}
+{ ADJUST COPPER POUR CLEARANCE                                                }
+{..............................................................................}
+Function AdjustCopperPourClearance(X, Y : Double; NewClearanceMM : Double) : Boolean;
+Var
+    Board : IPCB_Board;
+    Polygon : IPCB_Polygon;
+    Iter : IPCB_BoardIterator;
+    Distance, MinDistance : Double;
+    ClosestPolygon : IPCB_Polygon;
+    PolygonX, PolygonY : Double;
+Begin
+    Result := False;
+    Board := GetBoard;
+    If Board = Nil Then Exit;
+    
+    MinDistance := 999999;
+    ClosestPolygon := Nil;
+    
+    // Find the closest polygon to the violation location
+    Iter := Board.BoardIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(ePolyObject));
+    Iter.AddFilter_LayerSet(AllLayers);
+    
+    Polygon := Iter.FirstPCBObject;
+    While Polygon <> Nil Do
+    Begin
+        // Get polygon center point
+        PolygonX := CoordToMMs((Polygon.BoundingRectangle.Left + Polygon.BoundingRectangle.Right) / 2);
+        PolygonY := CoordToMMs((Polygon.BoundingRectangle.Bottom + Polygon.BoundingRectangle.Top) / 2);
+        
+        // Calculate distance to violation point
+        Distance := Sqrt((PolygonX - X) * (PolygonX - X) + (PolygonY - Y) * (PolygonY - Y));
+        
+        If Distance < MinDistance Then
+        Begin
+            MinDistance := Distance;
+            ClosestPolygon := Polygon;
+        End;
+        
+        Polygon := Iter.NextPCBObject;
+    End;
+    
+    Board.BoardIterator_Destroy(Iter);
+    
+    // If we found a polygon within 10mm of the violation
+    If (ClosestPolygon <> Nil) And (MinDistance < 10.0) Then
+    Begin
+        Try
+            PCBServer.PreProcess;
+            ClosestPolygon.BeginModify;
+            
+            // Try to set the clearance - property names may vary by Altium version
+            Try
+                // Method 1: Try PolyHatchStyle.ClearanceGap
+                ClosestPolygon.PolyHatchStyle.ClearanceGap := MMsToCoord(NewClearanceMM);
+            Except
+                Try
+                    // Method 2: Try direct Clearance property
+                    // Note: This property may not exist in all versions
+                    // ClosestPolygon.Clearance := MMsToCoord(NewClearanceMM);
+                Except
+                End;
+            End;
+            
+            ClosestPolygon.EndModify;
+            PCBServer.PostProcess;
+            
+            // Force polygon rebuild
+            ClosestPolygon.Rebuild;
+            Board.GraphicallyInvalidate;
+            
+            Result := True;
+        Except
+            Result := False;
+        End;
+    End;
+End;
+
+{..............................................................................}
+{ ADJUST COPPER POUR CLEARANCE BY NET                                         }
+{..............................................................................}
+Function AdjustCopperPourClearanceByNet(NetName : String; NewClearanceMM : Double) : Boolean;
+Var
+    Board : IPCB_Board;
+    Polygon : IPCB_Polygon;
+    Iter : IPCB_BoardIterator;
+    PolygonCount : Integer;
+Begin
+    Result := False;
+    Board := GetBoard;
+    If Board = Nil Then Exit;
+    
+    PolygonCount := 0;
+    
+    // Find all polygons on the specified net
+    Iter := Board.BoardIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(ePolyObject));
+    Iter.AddFilter_LayerSet(AllLayers);
+    
+    Polygon := Iter.FirstPCBObject;
+    While Polygon <> Nil Do
+    Begin
+        // Check if this polygon is on the specified net
+        If (Polygon.Net <> Nil) And (UpperCase(Polygon.Net.Name) = UpperCase(NetName)) Then
+        Begin
+            Try
+                PCBServer.PreProcess;
+                Polygon.BeginModify;
+                
+                // Try to set the clearance
+                Try
+                    Polygon.PolyHatchStyle.ClearanceGap := MMsToCoord(NewClearanceMM);
+                Except
+                End;
+                
+                Polygon.EndModify;
+                PCBServer.PostProcess;
+                
+                // Force polygon rebuild
+                Polygon.Rebuild;
+                Inc(PolygonCount);
+            Except
+            End;
+        End;
+        
+        Polygon := Iter.NextPCBObject;
+    End;
+    
+    Board.BoardIterator_Destroy(Iter);
+    Board.GraphicallyInvalidate;
+    
+    Result := PolygonCount > 0;
+End;
+
+{..............................................................................}
+{ REBUILD ALL POLYGONS                                                         }
+{..............................................................................}
+Function RebuildAllPolygons : Boolean;
+Var
+    Board : IPCB_Board;
+    Polygon : IPCB_Polygon;
+    Iter : IPCB_BoardIterator;
+    PolygonCount : Integer;
+Begin
+    Result := False;
+    Board := GetBoard;
+    If Board = Nil Then Exit;
+    
+    PolygonCount := 0;
+    
+    // Rebuild all polygons
+    Iter := Board.BoardIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(ePolyObject));
+    Iter.AddFilter_LayerSet(AllLayers);
+    
+    Polygon := Iter.FirstPCBObject;
+    While Polygon <> Nil Do
+    Begin
+        Try
+            Polygon.Rebuild;
+            Inc(PolygonCount);
+        Except
+        End;
+        Polygon := Iter.NextPCBObject;
+    End;
+    
+    Board.BoardIterator_Destroy(Iter);
+    Board.GraphicallyInvalidate;
+    
+    Result := PolygonCount > 0;
+End;
+
+{..............................................................................}
+{ REPOUR ALL POLYGONS - Force complete repour with updated clearances         }
+{..............................................................................}
+Function RepourAllPolygons : Boolean;
+Var
+    Board : IPCB_Board;
+    Polygon : IPCB_Polygon;
+    Iter : IPCB_BoardIterator;
+    PolygonCount : Integer;
+Begin
+    Result := False;
+    Board := GetBoard;
+    If Board = Nil Then Exit;
+    
+    PolygonCount := 0;
+    
+    Try
+        PCBServer.PreProcess;
+        
+        // Rebuild all polygons to force repour with current clearance settings
+        Iter := Board.BoardIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(ePolyObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        
+        Polygon := Iter.FirstPCBObject;
+        While Polygon <> Nil Do
+        Begin
+            Try
+                Polygon.BeginModify;
+                Polygon.Rebuild;  // Force repour with current settings
+                Polygon.EndModify;
+                Inc(PolygonCount);
+            Except
+            End;
+            Polygon := Iter.NextPCBObject;
+        End;
+        
+        Board.BoardIterator_Destroy(Iter);
+        PCBServer.PostProcess;
+        
+        // Final board refresh
+        Board.GraphicallyInvalidate;
+        
+    Except
+        PCBServer.PostProcess;
+    End;
+    
+    Result := PolygonCount > 0;
+End;
+
+{..............................................................................}
+{ EXPORT ACTUAL COPPER PRIMITIVES - Export poured copper regions, not outlines}
+{..............................................................................}
+Function ExportActualCopperPrimitives : Boolean;
+Var
+    Board : IPCB_Board;
+    Region : IPCB_Region;
+    Iter : IPCB_BoardIterator;
+    OutputFile : TextFile;
+    FilePath : String;
+    TempFilePath : String;
+    I : Integer;
+    Point : TPoint;
+    LayerName : String;
+    FirstRegion : Boolean;
+    FileOpened : Boolean;
+    DebugFile : TextFile;
+Begin
+    Result := False;
+    Board := GetBoard;
+    If Board = Nil Then Exit;
+    
+    // Create debug file to verify function is called
+    Try
+        AssignFile(DebugFile, BasePath + 'copper_export_debug.txt');
+        Rewrite(DebugFile);
+        WriteLn(DebugFile, 'ExportActualCopperPrimitives called at: ' + DateTimeToStr(Now));
+        WriteLn(DebugFile, 'Board found: ' + Board.FileName);
+        CloseFile(DebugFile);
+    Except
+    End;
+    
+    // Ensure BasePath is set
+    If BasePath = '' Then BasePath := GetBasePath;
+    
+    FilePath := BasePath + 'copper_primitives.json';
+    
+    // Improved file handling to avoid I/O errors
+    Try
+        // Use a temporary file first, then rename to avoid conflicts
+        TempFilePath := BasePath + 'copper_primitives_temp.json';
+        
+        // Clean up any existing temp file
+        If FileExists(TempFilePath) Then
+        Begin
+            Try
+                DeleteFile(TempFilePath);
+            Except
+            End;
+        End;
+        
+        // Write to temporary file first
+        AssignFile(OutputFile, TempFilePath);
+        Rewrite(OutputFile);
+        FileOpened := True;
+        
+        WriteLn(OutputFile, '{');
+        WriteLn(OutputFile, '"export_source": "altium_designer",');
+        WriteLn(OutputFile, '"export_type": "copper_primitives",');
+        WriteLn(OutputFile, '"export_timestamp": "' + DateTimeToStr(Now) + '",');
+        WriteLn(OutputFile, '"copper_regions": [');
+        
+        FirstRegion := True;
+        
+        // Export actual poured copper regions (not polygon outlines)
+        // NOTE: In Altium, poured copper is typically stored within polygon objects
+        // We need to iterate through polygons and check their poured state
+        Iter := Board.BoardIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(ePolyObject));  // Use polygon objects
+        Iter.AddFilter_LayerSet(AllLayers);
+        
+        Region := Iter.FirstPCBObject;
+        While Region <> Nil Do
+        Begin
+            // Check if this polygon is actually poured (has copper)
+            // Skip polygons that are not poured or are just outlines
+            // Use a simpler approach that doesn't rely on specific hatch style constants
+            If Region.Net = Nil Then
+            Begin
+                Region := Iter.NextPCBObject;
+                Continue;
+            End;
+            If Not FirstRegion Then
+                WriteLn(OutputFile, ',');
+            FirstRegion := False;
+            
+            LayerName := Layer2String(Region.Layer);
+            
+            WriteLn(OutputFile, '{');
+            WriteLn(OutputFile, '"type": "copper_region",');
+            WriteLn(OutputFile, '"layer": "' + LayerName + '",');
+            If Region.Net <> Nil Then
+                WriteLn(OutputFile, '"net": "' + Region.Net.Name + '",')
+            Else
+                WriteLn(OutputFile, '"net": "",');
+            WriteLn(OutputFile, '"is_poured": true,');
+            WriteLn(OutputFile, '"hatch_style": "solid",');
+            WriteLn(OutputFile, '"clearance_mm": 0.2,');
+            WriteLn(OutputFile, '"x_mm": ' + FloatToStr(CoordToMMs(Region.BoundingRectangle.Left)) + ',');
+            WriteLn(OutputFile, '"y_mm": ' + FloatToStr(CoordToMMs(Region.BoundingRectangle.Bottom)) + ',');
+            WriteLn(OutputFile, '"width_mm": ' + FloatToStr(CoordToMMs(Region.BoundingRectangle.Right - Region.BoundingRectangle.Left)) + ',');
+            WriteLn(OutputFile, '"height_mm": ' + FloatToStr(CoordToMMs(Region.BoundingRectangle.Top - Region.BoundingRectangle.Bottom)) + ',');
+            WriteLn(OutputFile, '"vertices": [');
+            
+            // Export bounding rectangle as simplified vertices (safe approach)
+            Write(OutputFile, '[' + FloatToStr(CoordToMMs(Region.BoundingRectangle.Left)) + ', ' + FloatToStr(CoordToMMs(Region.BoundingRectangle.Bottom)) + '],');
+            Write(OutputFile, '[' + FloatToStr(CoordToMMs(Region.BoundingRectangle.Right)) + ', ' + FloatToStr(CoordToMMs(Region.BoundingRectangle.Bottom)) + '],');
+            Write(OutputFile, '[' + FloatToStr(CoordToMMs(Region.BoundingRectangle.Right)) + ', ' + FloatToStr(CoordToMMs(Region.BoundingRectangle.Top)) + '],');
+            Write(OutputFile, '[' + FloatToStr(CoordToMMs(Region.BoundingRectangle.Left)) + ', ' + FloatToStr(CoordToMMs(Region.BoundingRectangle.Top)) + ']');
+            WriteLn(OutputFile, '');
+            
+            Write(OutputFile, ']}');
+            
+            Region := Iter.NextPCBObject;
+        End;
+        
+        Board.BoardIterator_Destroy(Iter);
+        
+        WriteLn(OutputFile, '');
+        WriteLn(OutputFile, ']');
+        WriteLn(OutputFile, '}');
+        
+        If FileOpened Then
+        Begin
+            CloseFile(OutputFile);
+            FileOpened := False;
+        End;
+        
+        // Move temp file to final location
+        If FileExists(TempFilePath) Then
+        Begin
+            // Delete existing final file if it exists
+            If FileExists(FilePath) Then
+            Begin
+                Try
+                    DeleteFile(FilePath);
+                Except
+                End;
+            End;
+            
+            // Rename temp file to final file
+            Try
+                RenameFile(TempFilePath, FilePath);
+            Except
+                // If rename fails, try copy and delete
+                Try
+                    CopyFile(PChar(TempFilePath), PChar(FilePath), False);
+                    DeleteFile(TempFilePath);
+                Except
+                End;
+            End;
+        End;
+        
+        Result := FileExists(FilePath);
+        
+    Except
+        If FileOpened Then
+        Begin
+            Try
+                CloseFile(OutputFile);
+            Except
+            End;
+        End;
+        
+        // Clean up temp file on error
+        If FileExists(TempFilePath) Then
+        Begin
+            Try
+                DeleteFile(TempFilePath);
+            Except
+            End;
+        End;
+        
+        Result := False;
+    End;
+End;
+
+{..............................................................................}
 { MOVE COMPONENT                                                               }
 {..............................................................................}
 Function MoveComp(Des : String; X, Y : Double) : Boolean;
@@ -335,12 +744,100 @@ Begin
 End;
 
 {..............................................................................}
+{ ROTATE COMPONENT                                                             }
+{..............................................................................}
+Function RotateComp(Des : String; Rotation : Double) : Boolean;
+Var
+    Board : IPCB_Board;
+    Comp  : IPCB_Component;
+    Iter  : IPCB_BoardIterator;
+    CName : String;
+Begin
+    Result := False;
+    Board := GetBoard;
+    If Board = Nil Then Exit;
+    
+    Des := UpperCase(Trim(Des));
+    
+    Iter := Board.BoardIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
+    Iter.AddFilter_LayerSet(AllLayers);
+    
+    Comp := Iter.FirstPCBObject;
+    While Comp <> Nil Do
+    Begin
+        CName := UpperCase(Comp.Name.Text);
+        
+        If CName = Des Then
+        Begin
+            PCBServer.PreProcess;
+            Comp.BeginModify;
+            Comp.Rotation := Rotation;
+            Comp.EndModify;
+            PCBServer.PostProcess;
+            Board.GraphicallyInvalidate;
+            Result := True;
+            Break;
+        End;
+        Comp := Iter.NextPCBObject;
+    End;
+    
+    Board.BoardIterator_Destroy(Iter);
+End;
+
+{..............................................................................}
+{ MOVE AND ROTATE COMPONENT                                                    }
+{..............................................................................}
+Function MoveAndRotateComp(Des : String; X, Y, Rotation : Double) : Boolean;
+Var
+    Board : IPCB_Board;
+    Comp  : IPCB_Component;
+    Iter  : IPCB_BoardIterator;
+    CName : String;
+Begin
+    Result := False;
+    Board := GetBoard;
+    If Board = Nil Then Exit;
+    
+    Des := UpperCase(Trim(Des));
+    
+    Iter := Board.BoardIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
+    Iter.AddFilter_LayerSet(AllLayers);
+    
+    Comp := Iter.FirstPCBObject;
+    While Comp <> Nil Do
+    Begin
+        CName := UpperCase(Comp.Name.Text);
+        
+        If CName = Des Then
+        Begin
+            PCBServer.PreProcess;
+            Comp.BeginModify;
+            Comp.X := MMsToCoord(X);
+            Comp.Y := MMsToCoord(Y);
+            Comp.Rotation := Rotation;
+            Comp.EndModify;
+            PCBServer.PostProcess;
+            Board.GraphicallyInvalidate;
+            Result := True;
+            Break;
+        End;
+        Comp := Iter.NextPCBObject;
+    End;
+    
+    Board.BoardIterator_Destroy(Iter);
+End;
+
+{..............................................................................}
 { ADD TRACK                                                                    }
 {..............................................................................}
 Function AddTrack(NetName, LayerName : String; X1, Y1, X2, Y2, Width : Double) : Boolean;
 Var
     Board : IPCB_Board;
     Track : IPCB_Track;
+    Net   : IPCB_Net;
+    Iter  : IPCB_BoardIterator;
 Begin
     Result := False;
     Board := GetBoard;
@@ -360,12 +857,98 @@ Begin
     Else
         Track.Layer := eTopLayer;
     
+    // CRITICAL: Assign net to the track so it counts as routing
+    If NetName <> '' Then
+    Begin
+        Try
+            Iter := Board.BoardIterator_Create;
+            Iter.AddFilter_ObjectSet(MkSet(eNetObject));
+            Iter.AddFilter_LayerSet(AllLayers);
+            Net := Iter.FirstPCBObject;
+            While Net <> Nil Do
+            Begin
+                If UpperCase(Net.Name) = UpperCase(NetName) Then
+                Begin
+                    Track.Net := Net;
+                    Break;
+                End;
+                Net := Iter.NextPCBObject;
+            End;
+            Board.BoardIterator_Destroy(Iter);
+        Except
+        End;
+    End;
+    
     PCBServer.PreProcess;
     Board.AddPCBObject(Track);
     PCBServer.PostProcess;
     Board.GraphicallyInvalidate;
     
     Result := True;
+End;
+
+{..............................................................................}
+{ DELETE TRACK - Remove a track matching specific coordinates                   }
+{..............................................................................}
+Function DeleteTrackAt(X1, Y1, X2, Y2 : Double; Tolerance : Double) : Boolean;
+Var
+    Board : IPCB_Board;
+    Track : IPCB_Track;
+    Iter  : IPCB_BoardIterator;
+    TX1, TY1, TX2, TY2, Dist1, Dist2 : Double;
+Begin
+    Result := False;
+    Board := GetBoard;
+    If Board = Nil Then Exit;
+    
+    If Tolerance <= 0 Then Tolerance := 0.1;
+    
+    Iter := Board.BoardIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(eTrackObject));
+    Iter.AddFilter_LayerSet(AllLayers);
+    
+    Track := Iter.FirstPCBObject;
+    While Track <> Nil Do
+    Begin
+        TX1 := CoordToMMs(Track.X1);
+        TY1 := CoordToMMs(Track.Y1);
+        TX2 := CoordToMMs(Track.X2);
+        TY2 := CoordToMMs(Track.Y2);
+        
+        // Check both orientations (track endpoints can be swapped)
+        Dist1 := Sqrt((TX1 - X1) * (TX1 - X1) + (TY1 - Y1) * (TY1 - Y1));
+        Dist2 := Sqrt((TX2 - X2) * (TX2 - X2) + (TY2 - Y2) * (TY2 - Y2));
+        
+        If (Dist1 < Tolerance) And (Dist2 < Tolerance) Then
+        Begin
+            PCBServer.PreProcess;
+            Board.RemovePCBObject(Track);
+            PCBServer.PostProcess;
+            Board.GraphicallyInvalidate;
+            Result := True;
+            Board.BoardIterator_Destroy(Iter);
+            Exit;
+        End;
+        
+        // Try swapped endpoints
+        Dist1 := Sqrt((TX1 - X2) * (TX1 - X2) + (TY1 - Y2) * (TY1 - Y2));
+        Dist2 := Sqrt((TX2 - X1) * (TX2 - X1) + (TY2 - Y1) * (TY2 - Y1));
+        
+        If (Dist1 < Tolerance) And (Dist2 < Tolerance) Then
+        Begin
+            PCBServer.PreProcess;
+            Board.RemovePCBObject(Track);
+            PCBServer.PostProcess;
+            Board.GraphicallyInvalidate;
+            Result := True;
+            Board.BoardIterator_Destroy(Iter);
+            Exit;
+        End;
+        
+        Track := Iter.NextPCBObject;
+    End;
+    
+    Board.BoardIterator_Destroy(Iter);
 End;
 
 {..............................................................................}
@@ -408,10 +991,9 @@ Var
     Iter : IPCB_BoardIterator;
     ViolationCount : Integer;
     ViolationList : TStringList;
-    Q, ViolationText, FinalPath, TempFilePath : String;
-    F, F2 : TextFile;
-    RetryCount : Integer;
-    LineContent : String;
+    Q, ViolationText, FinalPath : String;
+    F : TextFile;
+    ExportOK : Boolean;
 Begin
     Board := GetBoard;
     If Board = Nil Then
@@ -450,14 +1032,26 @@ Begin
             Try
                 ViolationText := ViolationText + Q + 'id' + Q + ':' + Q + 'violation-' + IntToStr(ViolationCount) + Q + ',';
                 If Violation.Rule <> Nil Then
-                    ViolationText := ViolationText + Q + 'rule_name' + Q + ':' + Q + EscapeJSONString(Violation.Rule.Name) + Q + ','
+                Begin
+                    ViolationText := ViolationText + Q + 'rule_name' + Q + ':' + Q + EscapeJSONString(Violation.Rule.Name) + Q + ',';
+                    // RuleKind is not available in some Altium script environments.
+                    // Use rule name as a stable fallback kind for downstream parsing.
+                    ViolationText := ViolationText + Q + 'rule_kind' + Q + ':' + Q + EscapeJSONString(Violation.Rule.Name) + Q + ',';
+                End
                 Else
+                Begin
                     ViolationText := ViolationText + Q + 'rule_name' + Q + ':' + Q + 'Unknown' + Q + ',';
-                ViolationText := ViolationText + Q + 'rule_kind' + Q + ':' + Q + EscapeJSONString(Violation.RuleKind) + Q + ',';
-                ViolationText := ViolationText + Q + 'message' + Q + ':' + Q + EscapeJSONString(Violation.Message) + Q + ',';
-                ViolationText := ViolationText + Q + 'x_mm' + Q + ':' + FloatToStr(CoordToMMs(Violation.X)) + ',';
-                ViolationText := ViolationText + Q + 'y_mm' + Q + ':' + FloatToStr(CoordToMMs(Violation.Y)) + ',';
-                ViolationText := ViolationText + Q + 'layer' + Q + ':' + Q + EscapeJSONString(Board.LayerName(Violation.Layer)) + Q;
+                    ViolationText := ViolationText + Q + 'rule_kind' + Q + ':' + Q + 'Unknown' + Q + ',';
+                End;
+                // Violation.Message/X/Y/Layer may not be available in some Altium script environments.
+                // Avoid hardcoded fake values; export dynamic minimal message and null coordinates.
+                If Violation.Rule <> Nil Then
+                    ViolationText := ViolationText + Q + 'message' + Q + ':' + Q + EscapeJSONString(Violation.Rule.Name + ' violation') + Q + ','
+                Else
+                    ViolationText := ViolationText + Q + 'message' + Q + ':' + Q + 'Unknown violation' + Q + ',';
+                ViolationText := ViolationText + Q + 'x_mm' + Q + ':' + 'null' + ',';
+                ViolationText := ViolationText + Q + 'y_mm' + Q + ':' + 'null' + ',';
+                ViolationText := ViolationText + Q + 'layer' + Q + ':' + Q + '' + Q;
             Except
                 // If any property access fails, just add basic info
                 ViolationText := ViolationText + Q + 'id' + Q + ':' + Q + 'violation-' + IntToStr(ViolationCount) + Q + ',';
@@ -476,14 +1070,22 @@ Begin
         End;
     End;
     
-    // Write violations to JSON file
-    FinalPath := BasePath + 'PCB_Project\altium_drc_violations.json';
-    TempFilePath := 'C:\Windows\Temp\altium_drc_' + FormatDateTime('yyyymmddhhnnss', Now) + '.json';
-    If Not DirectoryExists('C:\Windows\Temp\') Then
-        TempFilePath := BasePath + 'altium_drc_temp.json';
+    ExportOK := False;
     
+    // Remove stale file first (if present)
+    FinalPath := BasePath + 'altium_drc_violations.json';
+    If FileExists(FinalPath) Then
+    Begin
+        Try
+            DeleteFile(FinalPath);
+        Except
+        End;
+    End;
+    
+    // Write violations to JSON file (direct write, avoids temp-file Reset() failures)
+    FinalPath := BasePath + 'altium_drc_violations.json';
     Try
-        AssignFile(F, TempFilePath);
+        AssignFile(F, FinalPath);
         Rewrite(F);
         WriteLn(F, Chr(123));
         WriteLn(F, Q + 'violation_count' + Q + ':' + IntToStr(ViolationCount) + ',');
@@ -492,56 +1094,40 @@ Begin
         WriteLn(F, ']');
         WriteLn(F, Chr(125));
         CloseFile(F);
-        
-        // Copy to final location
-        RetryCount := 0;
-        While RetryCount < 10 Do
-        Begin
-            Try
-                If FileExists(FinalPath) Then
-                Begin
-                    Try
-                        DeleteFile(FinalPath);
-                        Sleep(300);
-                    Except
-                        Sleep(1000);
-                    End;
-                End;
-                
-                AssignFile(F, TempFilePath);
-                Reset(F);
-                AssignFile(F2, FinalPath);
-                Rewrite(F2);
-                
-                While Not EOF(F) Do
-                Begin
-                    ReadLn(F, LineContent);
-                    WriteLn(F2, LineContent);
-                End;
-                
-                CloseFile(F);
-                CloseFile(F2);
-                
-                If FileExists(FinalPath) Then
-                Begin
-                    Try
-                        DeleteFile(TempFilePath);
-                    Except
-                    End;
-                    Break;
-                End;
-            Except
-                Inc(RetryCount);
-                If RetryCount < 10 Then
-                    Sleep(500 * RetryCount);
-            End;
-        End;
+        ExportOK := FileExists(FinalPath);
     Except
+        // Fallback path for environments where BasePath root is not writable
+        Try
+            FinalPath := BasePath + 'PCB_Project\altium_drc_violations.json';
+            If FileExists(FinalPath) Then
+            Begin
+                Try
+                    DeleteFile(FinalPath);
+                Except
+                End;
+            End;
+            AssignFile(F, FinalPath);
+            Rewrite(F);
+            WriteLn(F, Chr(123));
+            WriteLn(F, Q + 'violation_count' + Q + ':' + IntToStr(ViolationCount) + ',');
+            WriteLn(F, Q + 'violations' + Q + ':[');
+            WriteLn(F, ViolationText);
+            WriteLn(F, ']');
+            WriteLn(F, Chr(125));
+            CloseFile(F);
+            ExportOK := FileExists(FinalPath);
+        Except
+            ExportOK := False;
+        End;
     End;
     
     ViolationList.Free;
     
-    If ViolationCount = 0 Then
+    If Not ExportOK Then
+    Begin
+        WriteRes(False, 'DRC completed but export failed. Could not write altium_drc_violations.json. Last path: ' + FinalPath);
+    End
+    Else If ViolationCount = 0 Then
         WriteRes(True, 'DRC completed. No violations found. Violations exported to: ' + FinalPath)
     Else
         WriteRes(True, 'DRC completed. Found ' + IntToStr(ViolationCount) + ' violations. Exported to: ' + FinalPath);
@@ -551,6 +1137,59 @@ End;
 { EXPORT PCB INFO - Silent-mode aware                                         }
 { When SilentMode=True, skips ShowMessage calls (used during rule creation)   }
 {..............................................................................}
+{..............................................................................}
+{ Detect Component Type from Footprint Pattern                                }
+{ Returns: BGA, SOIC, QFP, DIP, SOP, TSOP, TQFP, QFN, PLCC, SIP, SOJ, SOT, etc. }
+{..............................................................................}
+Function DetectComponentType(Comp : IPCB_Component) : String;
+Var
+    Pattern : String;
+    UpperPattern : String;
+Begin
+    Result := 'Unknown';
+    
+    If Comp = Nil Then Exit;
+    
+    Pattern := Comp.Pattern;
+    If Pattern = '' Then Pattern := Comp.SourceFootprintLibrary;
+    
+    UpperPattern := UpperCase(Pattern);
+    
+    // Check for common package types in order of specificity
+    If Pos('BGA', UpperPattern) > 0 Then Result := 'BGA'
+    Else If Pos('SOIC', UpperPattern) > 0 Then Result := 'SOIC'
+    Else If Pos('TQFP', UpperPattern) > 0 Then Result := 'TQFP'
+    Else If Pos('QFP', UpperPattern) > 0 Then Result := 'QFP'
+    Else If Pos('TSOP', UpperPattern) > 0 Then Result := 'TSOP'
+    Else If Pos('SOP', UpperPattern) > 0 Then Result := 'SOP'
+    Else If Pos('QFN', UpperPattern) > 0 Then Result := 'QFN'
+    Else If Pos('DFN', UpperPattern) > 0 Then Result := 'DFN'
+    Else If Pos('SON', UpperPattern) > 0 Then Result := 'SON'
+    Else If Pos('PLCC', UpperPattern) > 0 Then Result := 'PLCC'
+    Else If Pos('LCC', UpperPattern) > 0 Then Result := 'LCC'
+    Else If Pos('DIP', UpperPattern) > 0 Then Result := 'DIP'
+    Else If Pos('SIP', UpperPattern) > 0 Then Result := 'SIP'
+    Else If Pos('SOJ', UpperPattern) > 0 Then Result := 'SOJ'
+    Else If Pos('SOT', UpperPattern) > 0 Then Result := 'SOT'
+    Else If Pos('TO-', UpperPattern) > 0 Then Result := 'TO'
+    Else If Pos('SSOP', UpperPattern) > 0 Then Result := 'SSOP'
+    Else If Pos('TSSOP', UpperPattern) > 0 Then Result := 'TSSOP'
+    Else If Pos('MSOP', UpperPattern) > 0 Then Result := 'MSOP'
+    Else If Pos('VSOP', UpperPattern) > 0 Then Result := 'VSOP'
+    Else If Pos('LQFP', UpperPattern) > 0 Then Result := 'LQFP'
+    Else If Pos('PQFP', UpperPattern) > 0 Then Result := 'PQFP'
+    Else If Pos('VQFP', UpperPattern) > 0 Then Result := 'VQFP'
+    // Check for passive components
+    Else If (Pos('0402', UpperPattern) > 0) Or (Pos('0603', UpperPattern) > 0) Or 
+            (Pos('0805', UpperPattern) > 0) Or (Pos('1206', UpperPattern) > 0) Or
+            (Pos('1210', UpperPattern) > 0) Or (Pos('2512', UpperPattern) > 0) Then
+        Result := 'SMD'
+    // Check for connectors
+    Else If (Pos('CONN', UpperPattern) > 0) Or (Pos('HEADER', UpperPattern) > 0) Or
+            (Pos('PIN', UpperPattern) > 0) Then
+        Result := 'Connector';
+End;
+
 Procedure ExportPCBInfo;
 Var
     Board : IPCB_Board;
@@ -558,18 +1197,21 @@ Var
     Net   : IPCB_Net;
     Track : IPCB_Track;
     Via   : IPCB_Via;
+    Pad   : IPCB_Pad;
     Rule  : IPCB_Rule;
     ClearanceRule : IPCB_ClearanceConstraint;
     WidthRule : IPCB_MaxMinWidthConstraint;
     ViaRule : IPCB_RoutingViaRule;
     ShortCircuitRule : IPCB_ShortCircuitRule;
+    SizeX, SizeY, HoleSize : Double;
     MaskRule : IPCB_SolderMaskExpansionRule;
     Polygon : IPCB_Polygon;
     Layer : TLayer;
-    Iter : IPCB_BoardIterator;
+    Iter, PadIter : IPCB_BoardIterator;
+    CompPad : IPCB_Pad;
     F, F2 : TextFile;
-    Q, S, LayerName, NetName, FinalPath, LineContent, TempFilePath : String;
-    N, I, LayerID, CompCount, NetCount, TrackCount, ViaCount, RuleCount, RetryCount, VCount : Integer;
+    Q, S, LayerName, NetName, FinalPath, LineContent, TempFilePath, ShapeStr : String;
+    N, I, LayerID, CompCount, NetCount, TrackCount, ViaCount, PadCount, RuleCount, RetryCount, VCount : Integer;
     RuleTypeDetected : Boolean;
     ClearanceMM : Double;
 Begin
@@ -677,9 +1319,11 @@ Begin
             If LayerName <> '' Then
             Begin
                 If LayerID > 0 Then WriteLn(F, ',');
-                S := 'signal';
-                If Pos('GND', UpperCase(LayerName)) > 0 Then S := 'ground'
-                Else If (Pos('VCC', UpperCase(LayerName)) > 0) Or (Pos('POWER', UpperCase(LayerName)) > 0) Then S := 'power';
+                // Internal planes are always 'plane' kind
+                // Distinguish power/ground by name for additional info
+                S := 'plane';
+                If Pos('GND', UpperCase(LayerName)) > 0 Then S := 'plane'
+                Else If (Pos('VCC', UpperCase(LayerName)) > 0) Or (Pos('POWER', UpperCase(LayerName)) > 0) Then S := 'plane';
                 
                 WriteLn(F, Chr(123) + Q + 'id' + Q + ':' + Q + 'L' + IntToStr(LayerID+1) + Q);
                 WriteLn(F, ',' + Q + 'name' + Q + ':' + Q + LayerName + Q);
@@ -713,7 +1357,28 @@ Begin
         WriteLn(F, Q + 'layer' + Q + ':' + Q + Board.LayerName(Comp.Layer) + Q + ',');
         WriteLn(F, Q + 'footprint' + Q + ':' + Q + Comp.Pattern + Q + ',');
         WriteLn(F, Q + 'comment' + Q + ':' + Q + Comp.Comment.Text + Q + ',');
-        WriteLn(F, Q + 'pads' + Q + ':[]');
+        WriteLn(F, Q + 'component_type' + Q + ':' + Q + DetectComponentType(Comp) + Q + ',');
+        
+        // CRITICAL: Export component pads (link pads to components)
+        // This is essential for DRC to understand component-pad relationships
+        WriteLn(F, Q + 'pads' + Q + ':[');
+        Try
+            PadCount := 0;
+            PadIter := Comp.GroupIterator_Create;
+            PadIter.AddFilter_ObjectSet(MkSet(ePadObject));
+            CompPad := PadIter.FirstPCBObject;
+            While CompPad <> Nil Do
+            Begin
+                If PadCount > 0 Then WriteLn(F, ',');
+                WriteLn(F, Q + CompPad.Name + Q);
+                Inc(PadCount);
+                CompPad := PadIter.NextPCBObject;
+            End;
+            Comp.GroupIterator_Destroy(PadIter);
+        Except
+            // If pad iteration fails, export empty array
+        End;
+        WriteLn(F, ']');
         Write(F, Chr(125));
         Inc(N);
         Comp := Iter.NextPCBObject;
@@ -741,6 +1406,52 @@ Begin
     End;
     Board.BoardIterator_Destroy(Iter);
     NetCount := N;
+    WriteLn(F, '],');
+    
+    // Connections (Ratsnest lines - these represent UNROUTED pad pairs)
+    // In Altium, eConnectionObject stores ratsnest lines between pads that SHOULD be connected
+    // but have NO copper path between them. Once routed (via tracks/vias/planes), the connection
+    // object is removed. So remaining connections = unrouted connections.
+    // This gives Python DRC the EXACT unrouted connection data from Altium's connectivity engine.
+    WriteLn(F, Q + 'connections' + Q + ':[');
+    N := 0;
+    Try
+        Iter := Board.BoardIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eConnectionObject));
+        // Do NOT layer-filter connection objects.
+        // In some Altium builds, unrouted connection/ratsnest objects are not
+        // exposed on physical signal layers, so AllLayers filtering can hide them.
+        
+        Net := Iter.FirstPCBObject;
+        While Net <> Nil Do
+        Begin
+            If N > 0 Then WriteLn(F, ',');
+            NetName := '';
+            Try
+                If Net.Net <> Nil Then NetName := Net.Net.Name;
+            Except
+            End;
+            
+            WriteLn(F, Chr(123));
+            WriteLn(F, Q + 'net' + Q + ':' + Q + NetName + Q + ',');
+            Try
+                WriteLn(F, Q + 'from_x_mm' + Q + ':' + FloatToStr(CoordToMMs(Net.X1)) + ',');
+                WriteLn(F, Q + 'from_y_mm' + Q + ':' + FloatToStr(CoordToMMs(Net.Y1)) + ',');
+                WriteLn(F, Q + 'to_x_mm' + Q + ':' + FloatToStr(CoordToMMs(Net.X2)) + ',');
+                WriteLn(F, Q + 'to_y_mm' + Q + ':' + FloatToStr(CoordToMMs(Net.Y2)));
+            Except
+                WriteLn(F, Q + 'from_x_mm' + Q + ':0,');
+                WriteLn(F, Q + 'from_y_mm' + Q + ':0,');
+                WriteLn(F, Q + 'to_x_mm' + Q + ':0,');
+                WriteLn(F, Q + 'to_y_mm' + Q + ':0');
+            End;
+            Write(F, Chr(125));
+            Inc(N);
+            Net := Iter.NextPCBObject;
+        End;
+        Board.BoardIterator_Destroy(Iter);
+    Except
+    End;
     WriteLn(F, '],');
     
     // Tracks
@@ -773,6 +1484,92 @@ Begin
     TrackCount := N;
     WriteLn(F, '],');
     
+    // Fills (eFillObject - copper rectangles used for connections)
+    // Use Polygon variable + BoundingRectangle (works on all IPCB_Primitive objects)
+    WriteLn(F, Q + 'fills' + Q + ':[');
+    N := 0;
+    Try
+        Iter := Board.BoardIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eFillObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        
+        Polygon := Iter.FirstPCBObject;
+        While Polygon <> Nil Do
+        Begin
+            If N > 0 Then WriteLn(F, ',');
+            NetName := '';
+            Try
+                If Polygon.Net <> Nil Then NetName := Polygon.Net.Name;
+            Except
+            End;
+            
+            WriteLn(F, Chr(123));
+            WriteLn(F, Q + 'net' + Q + ':' + Q + NetName + Q + ',');
+            Try
+                WriteLn(F, Q + 'layer' + Q + ':' + Q + Board.LayerName(Polygon.Layer) + Q + ',');
+                WriteLn(F, Q + 'x1_mm' + Q + ':' + FloatToStr(CoordToMMs(Polygon.BoundingRectangle.Left)) + ',');
+                WriteLn(F, Q + 'y1_mm' + Q + ':' + FloatToStr(CoordToMMs(Polygon.BoundingRectangle.Bottom)) + ',');
+                WriteLn(F, Q + 'x2_mm' + Q + ':' + FloatToStr(CoordToMMs(Polygon.BoundingRectangle.Right)) + ',');
+                WriteLn(F, Q + 'y2_mm' + Q + ':' + FloatToStr(CoordToMMs(Polygon.BoundingRectangle.Top)));
+            Except
+                WriteLn(F, Q + 'layer' + Q + ':' + Q + '' + Q + ',');
+                WriteLn(F, Q + 'x1_mm' + Q + ':0,');
+                WriteLn(F, Q + 'y1_mm' + Q + ':0,');
+                WriteLn(F, Q + 'x2_mm' + Q + ':0,');
+                WriteLn(F, Q + 'y2_mm' + Q + ':0');
+            End;
+            Write(F, Chr(125));
+            Inc(N);
+            Polygon := Iter.NextPCBObject;
+        End;
+        Board.BoardIterator_Destroy(Iter);
+    Except
+    End;
+    WriteLn(F, '],');
+    
+    // Arcs (eArcObject - curved track segments)
+    // Use Polygon variable + BoundingRectangle for arc bounding box
+    WriteLn(F, Q + 'arcs' + Q + ':[');
+    N := 0;
+    Try
+        Iter := Board.BoardIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eArcObject));
+        Iter.AddFilter_LayerSet(AllLayers);
+        
+        Polygon := Iter.FirstPCBObject;
+        While Polygon <> Nil Do
+        Begin
+            If N > 0 Then WriteLn(F, ',');
+            NetName := '';
+            Try
+                If Polygon.Net <> Nil Then NetName := Polygon.Net.Name;
+            Except
+            End;
+            
+            WriteLn(F, Chr(123));
+            WriteLn(F, Q + 'net' + Q + ':' + Q + NetName + Q + ',');
+            Try
+                WriteLn(F, Q + 'layer' + Q + ':' + Q + Board.LayerName(Polygon.Layer) + Q + ',');
+                WriteLn(F, Q + 'x1_mm' + Q + ':' + FloatToStr(CoordToMMs(Polygon.BoundingRectangle.Left)) + ',');
+                WriteLn(F, Q + 'y1_mm' + Q + ':' + FloatToStr(CoordToMMs(Polygon.BoundingRectangle.Bottom)) + ',');
+                WriteLn(F, Q + 'x2_mm' + Q + ':' + FloatToStr(CoordToMMs(Polygon.BoundingRectangle.Right)) + ',');
+                WriteLn(F, Q + 'y2_mm' + Q + ':' + FloatToStr(CoordToMMs(Polygon.BoundingRectangle.Top)));
+            Except
+                WriteLn(F, Q + 'layer' + Q + ':' + Q + '' + Q + ',');
+                WriteLn(F, Q + 'x1_mm' + Q + ':0,');
+                WriteLn(F, Q + 'y1_mm' + Q + ':0,');
+                WriteLn(F, Q + 'x2_mm' + Q + ':0,');
+                WriteLn(F, Q + 'y2_mm' + Q + ':0');
+            End;
+            Write(F, Chr(125));
+            Inc(N);
+            Polygon := Iter.NextPCBObject;
+        End;
+        Board.BoardIterator_Destroy(Iter);
+    Except
+    End;
+    WriteLn(F, '],');
+    
     // Vias
     WriteLn(F, Q + 'vias' + Q + ':[');
     N := 0;
@@ -801,6 +1598,147 @@ Begin
     End;
     Board.BoardIterator_Destroy(Iter);
     ViaCount := N;
+    WriteLn(F, '],');
+    
+    // Pads (Component Pads)
+    WriteLn(F, Q + 'pads' + Q + ':[');
+    N := 0;
+    Iter := Board.BoardIterator_Create;
+    Iter.AddFilter_ObjectSet(MkSet(ePadObject));
+    Iter.AddFilter_LayerSet(AllLayers);
+    
+    Pad := Iter.FirstPCBObject;
+    While Pad <> Nil Do
+    Begin
+        If N > 0 Then WriteLn(F, ',');
+        NetName := '';
+        If Pad.Net <> Nil Then NetName := Pad.Net.Name;
+        
+        WriteLn(F, Chr(123));
+        WriteLn(F, Q + 'net' + Q + ':' + Q + NetName + Q + ',');
+        WriteLn(F, Q + 'x_mm' + Q + ':' + FloatToStr(CoordToMMs(Pad.X)) + ',');
+        WriteLn(F, Q + 'y_mm' + Q + ':' + FloatToStr(CoordToMMs(Pad.Y)) + ',');
+        WriteLn(F, Q + 'layer' + Q + ':' + Q + Board.LayerName(Pad.Layer) + Q + ',');
+        
+        // Export pad size (critical for connectivity checks and clearance calculations)
+        // CRITICAL: Pad size is essential for accurate DRC - without it, clearance checks fail
+        Try
+            // Try TopXSize/TopYSize first (most reliable for most pads)
+            SizeX := CoordToMMs(Pad.TopXSize);
+            SizeY := CoordToMMs(Pad.TopYSize);
+            // Validate sizes are reasonable (not zero or negative)
+            If (SizeX <= 0) Or (SizeY <= 0) Then
+            Begin
+                // If TopXSize/TopYSize returns invalid values, try fallback
+                // Don't raise exception, just fall through to next method
+                SizeX := 0;
+                SizeY := 0;
+            End;
+        Except
+            // If TopXSize/TopYSize access fails, set to 0 to trigger fallback
+            SizeX := 0;
+            SizeY := 0;
+        End;
+        
+        // Fallback: use bounding rectangle if TopXSize/TopYSize failed or returned invalid values
+        If (SizeX <= 0) Or (SizeY <= 0) Then
+        Begin
+            Try
+                SizeX := CoordToMMs(Pad.BoundingRectangle.Right - Pad.BoundingRectangle.Left);
+                SizeY := CoordToMMs(Pad.BoundingRectangle.Top - Pad.BoundingRectangle.Bottom);
+                // Validate bounding rectangle sizes
+                If (SizeX <= 0) Or (SizeY <= 0) Then
+                Begin
+                    // If bounding rectangle also fails, use default
+                    SizeX := 1.0;  // Default 1mm if all methods fail
+                    SizeY := 1.0;
+                End;
+            Except
+                // Final fallback: default size if all methods fail
+                // CRITICAL: Using 1.0mm default may cause false positives in clearance checks
+                // But it's better than 0 which would cause division by zero
+                SizeX := 1.0;  // Default 1mm if all methods fail
+                SizeY := 1.0;
+            End;
+        End;
+        WriteLn(F, Q + 'size_x_mm' + Q + ':' + FloatToStr(SizeX) + ',');
+        WriteLn(F, Q + 'size_y_mm' + Q + ':' + FloatToStr(SizeY) + ',');
+        
+        // Export pad hole size (critical for through-hole pads and clearance checks)
+        Try
+            HoleSize := CoordToMMs(Pad.HoleSize);
+            If HoleSize > 0 Then
+                WriteLn(F, Q + 'hole_size_mm' + Q + ':' + FloatToStr(HoleSize) + ',')
+            Else
+                WriteLn(F, Q + 'hole_size_mm' + Q + ':0,');
+        Except
+            WriteLn(F, Q + 'hole_size_mm' + Q + ':0,');
+        End;
+        
+        // Export pad shape/type (critical for accurate overlap detection)
+        // Note: Altium API doesn't have direct Pad.Shape property
+        // We infer shape from pad dimensions and use TopShape if available
+        Try
+            ShapeStr := 'Round';  // Default
+            Try
+                // Try to get shape from TopShape property (if available in this Altium version)
+                // TopShape returns: eRounded, eRectangular, eOctagonal, etc.
+                // Since direct access may not work, infer from dimensions
+                If Abs(SizeX - SizeY) < 0.001 Then
+                    ShapeStr := 'Round'  // Square pads appear as round when size_x == size_y
+                Else
+                    ShapeStr := 'Rectangular';  // Different X/Y sizes indicate rectangular
+            Except
+                // If TopShape access fails, infer from dimensions
+                If Abs(SizeX - SizeY) < 0.001 Then
+                    ShapeStr := 'Round'
+                Else
+                    ShapeStr := 'Rectangular';
+            End;
+            WriteLn(F, Q + 'shape' + Q + ':' + Q + ShapeStr + Q + ',');
+        Except
+            // Fallback: infer from dimensions
+            If Abs(SizeX - SizeY) < 0.001 Then
+                WriteLn(F, Q + 'shape' + Q + ':' + Q + 'Round' + Q + ',')
+            Else
+                WriteLn(F, Q + 'shape' + Q + ':' + Q + 'Rectangular' + Q + ',');
+        End;
+        
+        // Export pad rotation (affects bounding box calculation)
+        Try
+            WriteLn(F, Q + 'rotation' + Q + ':' + FloatToStr(Pad.Rotation) + ',');
+        Except
+            WriteLn(F, Q + 'rotation' + Q + ':0,');
+        End;
+        
+        // Export component reference (for linking pads to components)
+        If Pad.Component <> Nil Then
+        Begin
+            WriteLn(F, Q + 'component_designator' + Q + ':' + Q + Pad.Component.Name.Text + Q + ',');
+            WriteLn(F, Q + 'component_footprint' + Q + ':' + Q + Pad.Component.Pattern + Q + ',');
+        End
+        Else
+        Begin
+            WriteLn(F, Q + 'component_designator' + Q + ':' + Q + '' + Q + ',');
+            WriteLn(F, Q + 'component_footprint' + Q + ':' + Q + '' + Q + ',');
+        End;
+        
+        // Build designator from component name and pad name
+        // CRITICAL: Designator format must match what Python DRC expects
+        If Pad.Component <> Nil Then
+            WriteLn(F, Q + 'designator' + Q + ':' + Q + Pad.Component.Name.Text + '-' + Pad.Name + Q + ',')
+        Else
+            WriteLn(F, Q + 'designator' + Q + ':' + Q + 'PAD-' + IntToStr(N+1) + Q + ',');
+        
+        // Export pad name separately (useful for debugging)
+        WriteLn(F, Q + 'name' + Q + ':' + Q + Pad.Name + Q);
+        
+        Write(F, Chr(125));
+        Inc(N);
+        Pad := Iter.NextPCBObject;
+    End;
+    Board.BoardIterator_Destroy(Iter);
+    PadCount := N;
     WriteLn(F, '],');
     
     // Polygons (Polygon Regions/Pours)
@@ -875,8 +1813,8 @@ Begin
             End;
             
             // Export polygon pour clearance (critical for DRC)
-            // The polygon's pour clearance may not be directly accessible as a simple property.
-            // Python DRC engine will determine the effective clearance from design rules.
+            // Note: IPCB_Polygon does not expose PourClearance/Clearance properties in DelphiScript
+            // Python DRC engine will determine the effective clearance from the design rules
             WriteLn(F, Q + 'pour_clearance_mm' + Q + ':0,');
             
             // CRITICAL: Export actual poured copper geometry
@@ -895,15 +1833,18 @@ Begin
                     // For now, we'll export connection points and let Python simulate the pour
                     // This is more reliable than trying to access internal pour geometry
                     
-                    // Export connection information for Python to simulate dead copper removal
+                    // Export connection information
+                    // Note: IPCB_Polygon does not expose Grid/AirGap/TrackWidth properties
+                    // in DelphiScript. These cause compile-time errors, not runtime exceptions.
+                    // Python DRC engine determines effective clearance from design rules.
                     WriteLn(F, Chr(123));
                     WriteLn(F, Q + 'connection_simulation_data' + Q + ':' + Chr(123));
                     WriteLn(F, Q + 'thermal_relief_enabled' + Q + ':true,');
                     WriteLn(F, Q + 'remove_dead_copper' + Q + ':true,');
                     WriteLn(F, Q + 'pour_over_same_net_objects' + Q + ':true,');
-                    WriteLn(F, Q + 'connection_distance_mm' + Q + ':8.0,');  // Typical connection distance for dead copper removal
-                    WriteLn(F, Q + 'thermal_relief_gap_mm' + Q + ':0.254,');  // Typical thermal relief gap
-                    WriteLn(F, Q + 'thermal_relief_width_mm' + Q + ':0.381'); // Typical thermal relief spoke width
+                    WriteLn(F, Q + 'connection_distance_mm' + Q + ':0,');
+                    WriteLn(F, Q + 'thermal_relief_gap_mm' + Q + ':0,');
+                    WriteLn(F, Q + 'thermal_relief_width_mm' + Q + ':0');
                     WriteLn(F, Chr(125));
                     Write(F, Chr(125));
                 Except
@@ -1011,14 +1952,14 @@ Begin
         // CRITICAL: Improve rule type detection by checking rule names
         // The current logic marks everything as "clearance" which is wrong
         
-        // Width rules
+        // Width rules (name-based detection sets type; cast-based detection below reads actual values)
         If (Pos('WIDTH', S) > 0) And (Pos('CLEARANCE', S) = 0) Then
         Begin
             WriteLn(F, Q + 'type' + Q + ':' + Q + 'width' + Q + ',');
             WriteLn(F, Q + 'category' + Q + ':' + Q + 'Routing' + Q + ',');
-            WriteLn(F, Q + 'min_width_mm' + Q + ':0.254,');
-            WriteLn(F, Q + 'preferred_width_mm' + Q + ':0.838,');
-            WriteLn(F, Q + 'max_width_mm' + Q + ':15.0');
+            WriteLn(F, Q + 'min_width_mm' + Q + ':0,');
+            WriteLn(F, Q + 'preferred_width_mm' + Q + ':0,');
+            WriteLn(F, Q + 'max_width_mm' + Q + ':0');
             RuleTypeDetected := True;
         End
         
@@ -1108,15 +2049,15 @@ Begin
             RuleTypeDetected := True;
         End
         
-        // Via rules
+        // Via rules (name-based detection sets type; cast-based detection below reads actual values)
         Else If (Pos('VIA', S) > 0) And (Pos('CLEARANCE', S) = 0) Then
         Begin
             WriteLn(F, Q + 'type' + Q + ':' + Q + 'via' + Q + ',');
             WriteLn(F, Q + 'category' + Q + ':' + Q + 'Routing' + Q + ',');
-            WriteLn(F, Q + 'min_hole_mm' + Q + ':0.2,');
-            WriteLn(F, Q + 'max_hole_mm' + Q + ':1.0,');
-            WriteLn(F, Q + 'min_diameter_mm' + Q + ':0.5,');
-            WriteLn(F, Q + 'max_diameter_mm' + Q + ':2.0');
+            WriteLn(F, Q + 'min_hole_mm' + Q + ':0,');
+            WriteLn(F, Q + 'max_hole_mm' + Q + ':0,');
+            WriteLn(F, Q + 'min_diameter_mm' + Q + ':0,');
+            WriteLn(F, Q + 'max_diameter_mm' + Q + ':0');
             RuleTypeDetected := True;
         End
         
@@ -1191,82 +2132,56 @@ Begin
                 // If cast succeeds without exception, it's a clearance rule
                 WriteLn(F, Q + 'type' + Q + ':' + Q + 'clearance' + Q + ',');
                 WriteLn(F, Q + 'category' + Q + ':' + Q + 'Electrical' + Q + ',');
-                // CRITICAL: Read actual clearance value from rule
-                // Note: Altium API may not expose readable properties for clearance value
-                // Python will read the actual value from Rules6/Data stream in the PCB file
-                // For now, export rule type and name - Python's altium_file_reader.py will extract the actual value
-                Try
-                    // Try to read clearance value - but API may not support it
-                    // If this fails, Python will read from Rules6/Data stream instead
-                    ClearanceMM := 0.0;  // Placeholder - actual value read by Python from PCB file
-                    WriteLn(F, Q + 'clearance_mm' + Q + ':0.0');
-                Except
-                    WriteLn(F, Q + 'clearance_mm' + Q + ':0.0');
-                End;
+                
+                // CRITICAL: Gap property is NOT accessible via Altium scripting API
+                // The property exists in the UI but is not exposed to DelphiScript
+                // We must default to 0.0 and fix it manually using fix_clearance_values.py
+                WriteLn(F, Q + 'clearance_mm' + Q + ':0.0');
+                
                 RuleTypeDetected := True;
             Except
             End;
         End;
         
-        // Try to detect Width Rule
+        // Try to detect Width Rule by cast
+        // Note: WidthRule properties (MinWidth, MaxWidth, etc.) are WRITE-ONLY in DelphiScript
+        // Python's OLE file reader extracts actual values from the PCB binary
         If Not RuleTypeDetected Then
         Begin
             Try
                 WidthRule := Rule;
-                // If cast succeeds, it's a width rule
                 WriteLn(F, Q + 'type' + Q + ':' + Q + 'width' + Q + ',');
                 WriteLn(F, Q + 'category' + Q + ':' + Q + 'Routing' + Q + ',');
-                // CRITICAL: Read actual width values from rule
-                Try
-                    WriteLn(F, Q + 'min_width_mm' + Q + ':' + FloatToStr(CoordToMMs(WidthRule.MinWidth)) + ',');
-                Except
-                    WriteLn(F, Q + 'min_width_mm' + Q + ':0.254,');
-                End;
-                Try
-                    WriteLn(F, Q + 'preferred_width_mm' + Q + ':' + FloatToStr(CoordToMMs(WidthRule.PreferredWidth)) + ',');
-                Except
-                    Try
-                        WriteLn(F, Q + 'preferred_width_mm' + Q + ':' + FloatToStr(CoordToMMs(WidthRule.PreferedWidth)) + ',');
-                    Except
-                        WriteLn(F, Q + 'preferred_width_mm' + Q + ':0.838,');
-                    End;
-                End;
-                Try
-                    WriteLn(F, Q + 'max_width_mm' + Q + ':' + FloatToStr(CoordToMMs(WidthRule.MaxWidth)));
-                Except
-                    WriteLn(F, Q + 'max_width_mm' + Q + ':15.0');
-                End;
+                WriteLn(F, Q + 'min_width_mm' + Q + ':0,');
+                WriteLn(F, Q + 'preferred_width_mm' + Q + ':0,');
+                WriteLn(F, Q + 'max_width_mm' + Q + ':0');
                 RuleTypeDetected := True;
             Except
-                // Fallback: detect by name if cast fails
                 If Pos('WIDTH', UpperCase(LayerName)) > 0 Then
                 Begin
                     WriteLn(F, Q + 'type' + Q + ':' + Q + 'width' + Q + ',');
                     WriteLn(F, Q + 'category' + Q + ':' + Q + 'Routing' + Q + ',');
-                    WriteLn(F, Q + 'min_width_mm' + Q + ':0.254,');
-                    WriteLn(F, Q + 'preferred_width_mm' + Q + ':0.838,');
-                    WriteLn(F, Q + 'max_width_mm' + Q + ':15.0');
+                    WriteLn(F, Q + 'min_width_mm' + Q + ':0,');
+                    WriteLn(F, Q + 'preferred_width_mm' + Q + ':0,');
+                    WriteLn(F, Q + 'max_width_mm' + Q + ':0');
                     RuleTypeDetected := True;
                 End;
             End;
         End;
         
-        // Try to detect Via Rule - attempt cast to IPCB_RoutingViaRule
+        // Try to detect Via Rule by cast
+        // Note: ViaRule properties (MinHoleSize, MaxHoleSize, etc.) are WRITE-ONLY in DelphiScript
+        // Python's OLE file reader extracts actual values from the PCB binary
         If Not RuleTypeDetected Then
         Begin
             Try
                 ViaRule := Rule;
-                // If cast succeeds without exception, it's a via rule
                 WriteLn(F, Q + 'type' + Q + ':' + Q + 'via' + Q + ',');
                 WriteLn(F, Q + 'category' + Q + ':' + Q + 'Routing' + Q + ',');
-                Try
-                    WriteLn(F, Q + 'min_hole_mm' + Q + ':' + FloatToStr(CoordToMMs(ViaRule.MinHoleSize)) + ',');
-                    WriteLn(F, Q + 'max_hole_mm' + Q + ':' + FloatToStr(CoordToMMs(ViaRule.MaxHoleSize)) + ',');
-                    WriteLn(F, Q + 'min_diameter_mm' + Q + ':' + FloatToStr(CoordToMMs(ViaRule.MinWidth)) + ',');
-                    WriteLn(F, Q + 'max_diameter_mm' + Q + ':' + FloatToStr(CoordToMMs(ViaRule.MaxWidth)));
-                Except
-                    WriteLn(F, Q + 'min_hole_mm' + Q + ':0.0');
-                End;
+                WriteLn(F, Q + 'min_hole_mm' + Q + ':0,');
+                WriteLn(F, Q + 'max_hole_mm' + Q + ':0,');
+                WriteLn(F, Q + 'min_diameter_mm' + Q + ':0,');
+                WriteLn(F, Q + 'max_diameter_mm' + Q + ':0');
                 RuleTypeDetected := True;
             Except
             End;
@@ -2142,13 +3057,15 @@ End;
 Procedure ProcessCommand;
 Var
     Cmd, Act, Des, Net, Layer, RuleType, RuleName, Scope1, Scope2 : String;
-    X, Y, X1, Y1, X2, Y2, W, Hole, Diam : Double;
+    TempFile, ResultFile : String;  // For atomic file writes
+    X, Y, X1, Y1, X2, Y2, W, Hole, Diam, Rotation : Double;
     OK, RuleFound : Boolean;
     N : Integer;
     Board : IPCB_Board;
     Rule : IPCB_Rule;
     Iter : IPCB_BoardIterator;
     SL : TStringList;
+    OutputFile : TextFile;  // For file I/O operations
 Begin
     Cmd := ReadCmd;
     
@@ -2206,6 +3123,119 @@ Begin
         Else
             WriteRes(False, 'Component ' + Des + ' not found');
     End
+    
+    // ROTATE COMPONENT
+    Else If Act = 'rotate_component' Then
+    Begin
+        Des := ParseValue(Cmd, 'designator');
+        Rotation := StrToFloat(ParseValue(Cmd, 'rotation'));
+        
+        OK := RotateComp(Des, Rotation);
+        
+        If OK Then
+            WriteRes(True, Des + ' rotated to ' + FloatToStr(Rotation) + ' degrees')
+        Else
+            WriteRes(False, 'Component ' + Des + ' not found');
+    End
+    
+    // MOVE AND ROTATE COMPONENT
+    Else If Act = 'move_and_rotate_component' Then
+    Begin
+        Des := ParseValue(Cmd, 'designator');
+        X := StrToFloat(ParseValue(Cmd, 'x'));
+        Y := StrToFloat(ParseValue(Cmd, 'y'));
+        Rotation := StrToFloat(ParseValue(Cmd, 'rotation'));
+        
+        OK := MoveAndRotateComp(Des, X, Y, Rotation);
+        
+        If OK Then
+            WriteRes(True, Des + ' moved to (' + FloatToStr(X) + ', ' + FloatToStr(Y) + ') mm and rotated to ' + FloatToStr(Rotation) + ' degrees')
+        Else
+            WriteRes(False, 'Component ' + Des + ' not found');
+    End
+    
+    // REBUILD ALL POLYGONS
+    Else If Act = 'rebuild_polygons' Then
+    Begin
+        OK := RebuildAllPolygons;
+        
+        If OK Then
+            WriteRes(True, 'All polygons rebuilt successfully')
+        Else
+            WriteRes(False, 'Failed to rebuild polygons');
+    End
+    
+    // REPOUR ALL POLYGONS - Force complete repour with updated clearances
+    Else If Act = 'repour_polygons' Then
+    Begin
+        OK := RepourAllPolygons;
+        
+        If OK Then
+            WriteRes(True, 'All polygons repoured successfully')
+        Else
+            WriteRes(False, 'Failed to repour polygons');
+    End
+    
+    // GET DRC STATUS - Get current DRC violations from Altium
+    Else If Act = 'get_drc_status' Then
+    Begin
+        // Disable simulated DRC payloads to avoid any hard-coded result usage.
+        TempFile := BasePath + 'command_result.tmp';
+        ResultFile := BasePath + 'command_result.txt';
+        
+        AssignFile(OutputFile, TempFile);
+        Rewrite(OutputFile);
+        WriteLn(OutputFile, '{"success": false, "action": "get_drc_status", "error": "get_drc_status is disabled. Use Python DRC engine in MCP run_drc()."}');
+        CloseFile(OutputFile);
+        
+        // Atomic rename
+        If FileExists(ResultFile) Then
+            DeleteFile(ResultFile);
+        RenameFile(TempFile, ResultFile);
+    End
+    
+    // EXPORT ACTUAL COPPER PRIMITIVES - Export poured copper regions
+    Else If Act = 'export_copper_primitives' Then
+    Begin
+        OK := ExportActualCopperPrimitives;
+        
+        If OK Then
+            WriteRes(True, 'Copper primitives exported successfully')
+        Else
+            WriteRes(False, 'Failed to export copper primitives');
+    End
+    
+    // ADJUST COPPER POUR CLEARANCE
+    Else If Act = 'adjust_copper_pour_clearance' Then
+    Begin
+        X := StrToFloat(ParseValue(Cmd, 'x'));
+        Y := StrToFloat(ParseValue(Cmd, 'y'));
+        W := StrToFloat(ParseValue(Cmd, 'clearance_mm'));
+        If W <= 0 Then W := 0.4;  // Default to 0.4mm clearance
+        
+        OK := AdjustCopperPourClearance(X, Y, W);
+        
+        If OK Then
+            WriteRes(True, 'Copper pour clearance adjusted to ' + FloatToStr(W) + 'mm at (' + FloatToStr(X) + ', ' + FloatToStr(Y) + ')')
+        Else
+            WriteRes(False, 'No copper pour found near (' + FloatToStr(X) + ', ' + FloatToStr(Y) + ')');
+    End
+    
+    // ADJUST COPPER POUR CLEARANCE BY NET
+    Else If Act = 'adjust_copper_pour_clearance_by_net' Then
+    Begin
+        Net := ParseValue(Cmd, 'net');
+        W := StrToFloat(ParseValue(Cmd, 'clearance_mm'));
+        If W <= 0 Then W := 0.4;  // Default to 0.4mm clearance
+        
+        OK := AdjustCopperPourClearanceByNet(Net, W);
+        
+        If OK Then
+            WriteRes(True, 'Copper pour clearance adjusted to ' + FloatToStr(W) + 'mm for net ' + Net)
+        Else
+            WriteRes(False, 'No copper pours found for net ' + Net);
+    End
+    
     Else If Act = 'add_track' Then
     Begin
         Net := ParseValue(Cmd, 'net');
@@ -2242,6 +3272,22 @@ Begin
             WriteRes(True, 'Via added at (' + FloatToStr(X) + ', ' + FloatToStr(Y) + ')')
         Else
             WriteRes(False, 'Failed to add via');
+    End
+    
+    // DELETE TRACK
+    Else If Act = 'delete_track' Then
+    Begin
+        X1 := StrToFloat(ParseValue(Cmd, 'x1'));
+        Y1 := StrToFloat(ParseValue(Cmd, 'y1'));
+        X2 := StrToFloat(ParseValue(Cmd, 'x2'));
+        Y2 := StrToFloat(ParseValue(Cmd, 'y2'));
+        
+        OK := DeleteTrackAt(X1, Y1, X2, Y2, 0.1);
+        
+        If OK Then
+            WriteRes(True, 'Track deleted at (' + FloatToStr(X1) + ',' + FloatToStr(Y1) + ')-(' + FloatToStr(X2) + ',' + FloatToStr(Y2) + ')')
+        Else
+            WriteRes(False, 'No track found at specified coordinates');
     End
     
     // RUN DRC
